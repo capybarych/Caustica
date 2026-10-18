@@ -121,7 +121,11 @@ public final class RtComposite {
     // riding the same ring slot, addressed from WorldPush.cloudCellsAddr exactly like the ready mask
     // above is addressed from the push constants — no extra binding, one flush covers all three.
     private static final int CLOUD_CELLS_OFFSET = (READY_MASK_OFFSET + READY_MASK_CAPACITY + 15) & ~15;
-    private static final int WORLD_PUSH_BUFFER_SIZE = CLOUD_CELLS_OFFSET + RtCloudCells.MAP_BYTES;
+    // The blue-noise dither tile (RtBlueNoise) rides the same slot, addressed from
+    // WorldPush.blueNoiseAddr. Unlike the per-frame regions above it, the tile is static for the whole
+    // session, so it is written and flushed once when each ring slot is created.
+    private static final int BLUE_NOISE_OFFSET = (CLOUD_CELLS_OFFSET + RtCloudCells.MAP_BYTES + 15) & ~15;
+    private static final int WORLD_PUSH_BUFFER_SIZE = BLUE_NOISE_OFFSET + RtBlueNoise.BYTES;
     // Real inline push constants (fast constant-bank reads), separate from the WorldPush BDA ring above.
     // Hot addresses/frameIndex and raygen's debugView avoid unnecessary global-memory dereferences;
     // WorldPushConstantsData is generated from the same Slang module and owns this second ABI as well.
@@ -1012,8 +1016,10 @@ public final class RtComposite {
             if (pushRing == null) {
                 pushRing = new PushSlot[PUSH_RING];
                 for (int i = 0; i < PUSH_RING; i++) {
-                    pushRing[i] = new PushSlot(ctx.createBuffer(WORLD_PUSH_BUFFER_SIZE,
+                    PushSlot slot = new PushSlot(ctx.createBuffer(WORLD_PUSH_BUFFER_SIZE,
                             VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, "rt world push " + i));
+                    writeBlueNoise(slot.buffer);
+                    pushRing[i] = slot;
                 }
             }
             if (output != null) {
@@ -1077,6 +1083,18 @@ public final class RtComposite {
         // incrementally displaying old UVs/IDs against the new atlas/table.
         RtTerrain.requestFullClear();
         materialEpochTraceGate = true;
+    }
+
+    /**
+     * Copy the static blue-noise tile into one BDA ring slot and flush it once. The shader addresses
+     * it through {@code WorldPush.blueNoiseAddr}; every slot gets the same tile because frames rotate
+     * through them without tracking which slot already received it.
+     */
+    private static void writeBlueNoise(RtBuffer buffer) {
+        ByteBuffer tile = MemoryUtil.memByteBuffer(buffer.mapped + BLUE_NOISE_OFFSET, RtBlueNoise.BYTES)
+                .order(ByteOrder.nativeOrder());
+        tile.asIntBuffer().put(RtBlueNoise.INSTANCE.words(), 0, RtBlueNoise.WORDS);
+        buffer.flush(BLUE_NOISE_OFFSET, RtBlueNoise.BYTES);
     }
 
     private void refreshMaterialBindingsIfNeeded(RtContext ctx) {
@@ -1723,6 +1741,9 @@ public final class RtComposite {
                     clouds.anchor(),
                     clouds.color(),
                     cloudCellsAddress,
+                    // Static blue-noise dither tile (WorldPush.blueNoiseAddr) — written once per ring
+                    // slot in writeBlueNoise, only the address travels per frame.
+                    pushBuf.deviceAddress + BLUE_NOISE_OFFSET,
                     // Shader-only POM: x relief depth (blocks), y max texel crossings, w fade distance.
                     parallaxParams(),
                     dimension,

@@ -1012,8 +1012,15 @@ public final class RtVideoOptions {
             position -> setting.set(DLSS_QUALITY_ORDER.get(position)));
     }
 
-    private static final List<Integer> DLSS_PRESET_ORDER = List.of(0, 6);
+    // The preset values and their meaning live next to the setting (CausticaConfig.Rt.DlssRr), so the
+    // slider and the config sanitizer can never disagree about which letters exist.
+    private static final List<Integer> DLSS_PRESET_ORDER = CausticaConfig.Rt.DlssRr.PRESET_VALUES;
 
+    /**
+     * The DLSS Ray Reconstruction model-preset slider. Changing it is a live operation: the setting is
+     * read every frame and {@code RtDlssRr.ensureFeature} recreates the RR feature (which carries its
+     * presets at creation time) when the value differs, resetting RR history once for the new model.
+     */
     private static OptionInstance<Integer> dlssPreset() {
         IntSetting setting = CausticaConfig.Rt.DlssRr.PRESET;
         int initialPreset = DLSS_PRESET_ORDER.contains(setting.value()) ? setting.value() : 0;

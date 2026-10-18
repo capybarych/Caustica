@@ -111,6 +111,12 @@ public struct WorldPush {
     // the DH ready mask, no extra binding.
     public float4   cloudColor;
     public uint64_t cloudCellsAddr;
+    // Blue-noise dither tile (RtBlueNoise, host side): 64x64 RGBA8 words, R/G = the BSDF direction
+    // pair and B/A = the NEE light-position pair. math.slang samples it at pixel coordinates with a
+    // per-frame/per-sample toroidal shift, so the first stochastic choice at every shading vertex is
+    // spatially well distributed instead of white-noise hash grain. 0 = no tile published (host not
+    // ready), and every call site falls back to the PCG stream unchanged.
+    public uint64_t blueNoiseAddr;
     // Shader-only Parallax Occlusion Mapping (LabPBR _n alpha height field). Geometry and BLASes are
     // never rebuilt; a zero relief depth disables the effect entirely.
     public float4   parallaxParams;   // x relief depth, y max texel crossings, z unused, w max distance

@@ -1116,7 +1116,24 @@ public final class CausticaConfig {
 
         public static final class DlssRr {
             public static final BooleanSetting ENABLED = bool("caustica.rt.dlssRr", "dlss-rr.enabled", true);
-            public static final IntSetting PRESET = intValue("caustica.rt.dlssRr.preset", "dlss-rr.preset", 0);
+
+            /**
+             * The NVSDK_NGX_RayReconstruction_Hint_Render_Preset values the model-preset slider steps
+             * through, in slider order: 0 = let the DLL pick its per-mode default, 4 = preset D (the
+             * first transformer model), 5 = preset E (the latest first-generation transformer, required
+             * when a depth-of-field guide is fed), 6 = preset F (the second-generation transformer,
+             * DLSS 4.5 Ray Reconstruction).
+             *
+             * <p>This is Ray Reconstruction's own enum, unrelated to Super Resolution's letters. A/B/C
+             * are absent because NVIDIA removed them ("removed, use preset D or E") and every letter
+             * past F is documented as "do not use, reverts to default behavior", so offering them
+             * would only produce a UI that promises a model the DLL is not running.
+             */
+            public static final List<Integer> PRESET_VALUES = List.of(0, 4, 5, 6);
+
+            /** One of {@link #PRESET_VALUES}; anything else (stale config, preset A) snaps to default. */
+            public static final IntSetting PRESET = new IntSetting("caustica.rt.dlssRr.preset", "dlss-rr.preset", 0,
+                    v -> PRESET_VALUES.contains(v) ? v : 0);
             public static final IntSetting QUALITY = intValue("caustica.rt.dlssRr.quality", "dlss-rr.quality", 0);
 
             private DlssRr() {
