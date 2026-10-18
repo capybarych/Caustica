@@ -1,0 +1,90 @@
+#version 460
+
+// Multi-scale Bloom progressive upsample compute shader.
+//
+// Samples the coarser bloom mip (coarseTex, mip[i + 1]) with a tent filter whose footprint and
+// cross-octave scatter weight are controlled by pc.radius and pc.quality, and blends it with
+// the finer bloom mip (fineImage, mip[i]) using an energy-conserving convex combination.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D coarseTex;
+layout(binding = 1, rgba16f) uniform image2D fineImage;
+
+layout(push_constant) uniform Push {
+    int coarseWidth;
+    int coarseHeight;
+    int fineWidth;
+    int fineHeight;
+    int quality;
+    float radius;
+} pc;
+
+vec3 safeSample(vec2 uv) {
+    vec3 s = texture(coarseTex, uv).rgb;
+    if (any(isnan(s)) || any(isinf(s))) {
+        return vec3(0.0);
+    }
+    return min(max(s, vec3(0.0)), vec3(65504.0));
+}
+
+vec3 sampleTent9(vec2 uv, vec2 d) {
+    vec3 s0 = safeSample(uv + vec2(-d.x, -d.y));
+    vec3 s1 = safeSample(uv + vec2( 0.0, -d.y)) * 2.0;
+    vec3 s2 = safeSample(uv + vec2( d.x, -d.y));
+    vec3 s3 = safeSample(uv + vec2(-d.x,  0.0)) * 2.0;
+    vec3 s4 = safeSample(uv)                    * 4.0;
+    vec3 s5 = safeSample(uv + vec2( d.x,  0.0)) * 2.0;
+    vec3 s6 = safeSample(uv + vec2(-d.x,  d.y));
+    vec3 s7 = safeSample(uv + vec2( 0.0,  d.y)) * 2.0;
+    vec3 s8 = safeSample(uv + vec2( d.x,  d.y));
+    return (s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8) * (1.0 / 16.0);
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= pc.fineWidth || pix.y >= pc.fineHeight) {
+        return;
+    }
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(max(pc.fineWidth, 1), max(pc.fineHeight, 1));
+    vec2 texel = 1.0 / vec2(max(pc.coarseWidth, 1), max(pc.coarseHeight, 1));
+    float r = clamp(pc.radius, 0.0, 1.0);
+    float sampleScale = mix(0.65, 1.65, r);
+    vec2 d = texel * sampleScale;
+
+    vec3 upsampled;
+    if (pc.quality <= 0) {
+        // Low quality: 5-tap cross/box tent filter.
+        vec3 c  = safeSample(uv) * 4.0;
+        vec3 tl = safeSample(uv + vec2(-d.x, -d.y));
+        vec3 tr = safeSample(uv + vec2( d.x, -d.y));
+        vec3 bl = safeSample(uv + vec2(-d.x,  d.y));
+        vec3 br = safeSample(uv + vec2( d.x,  d.y));
+        upsampled = (c + tl + tr + bl + br) * (1.0 / 8.0);
+    } else if (pc.quality <= 2) {
+        // Medium / High quality: 9-tap 3x3 tent filter.
+        upsampled = sampleTent9(uv, d);
+    } else {
+        // Ultra quality: 13-tap dual-ring isotropic tent filter for circular halo symmetry.
+        vec3 inner = sampleTent9(uv, d);
+        vec2 outerD = d * 1.85;
+        vec3 o0 = safeSample(uv + vec2(-outerD.x,  0.0));
+        vec3 o1 = safeSample(uv + vec2( outerD.x,  0.0));
+        vec3 o2 = safeSample(uv + vec2( 0.0,      -outerD.y));
+        vec3 o3 = safeSample(uv + vec2( 0.0,       outerD.y));
+        vec3 outer = (o0 + o1 + o2 + o3) * 0.25;
+        upsampled = mix(inner, outer, 0.28);
+    }
+
+    vec3 fine = imageLoad(fineImage, pix).rgb;
+    if (any(isnan(fine)) || any(isinf(fine))) {
+        fine = vec3(0.0);
+    } else {
+        fine = min(max(fine, vec3(0.0)), vec3(65504.0));
+    }
+
+    float scatter = mix(0.28, 0.85, r);
+    vec3 combined = mix(fine, upsampled, scatter);
+    imageStore(fineImage, pix, vec4(min(max(combined, vec3(0.0)), vec3(65504.0)), 1.0));
+}

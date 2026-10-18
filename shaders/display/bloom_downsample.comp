@@ -1,0 +1,135 @@
+#version 460
+
+// Multi-scale Bloom downsample + highlight prefilter compute shader.
+//
+// Pass 0 (pc.passIndex == 0) reads the full-resolution scene-linear HDR image (rrOutput) and
+// the 1x1 scene exposure scale, normalizes radiance into exposure-referenced linear space,
+// extracts bright highlights using a configurable luminance threshold and quadratic soft knee,
+// and downsamples into mip 0 (half resolution).
+// Subsequent passes (pc.passIndex > 0) progressively downsample mip[i - 1] into mip[i].
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D srcTex;
+layout(binding = 1, r32f) readonly uniform image2D exposureImage;
+layout(binding = 2, rgba16f) writeonly uniform image2D dstImage;
+
+layout(push_constant) uniform Push {
+    int srcWidth;
+    int srcHeight;
+    int dstWidth;
+    int dstHeight;
+    int passIndex;
+    int quality;
+    float threshold;
+    float softKnee;
+} pc;
+
+const vec3 LUMA_WEIGHTS = vec3(0.2126, 0.7152, 0.0722);
+const float FIREFLY_KNEE = 32.0;
+
+float karisWeight(vec3 c) {
+    return 1.0 / (1.0 + max(dot(c, LUMA_WEIGHTS), 0.0));
+}
+
+vec3 prefilterHighlight(vec3 rawHdr, float exposure) {
+    if (any(isnan(rawHdr)) || any(isinf(rawHdr))) {
+        return vec3(0.0);
+    }
+    vec3 c = min(max(rawHdr, vec3(0.0)) * exposure, vec3(65504.0));
+    float luma = dot(c, LUMA_WEIGHTS);
+    if (luma <= 1.0e-5) {
+        return vec3(0.0);
+    }
+
+    // Gently compress extreme single-ray path-tracing outliers above FIREFLY_KNEE while keeping
+    // normal emissive blocks, light sources, and specular highlights linear.
+    if (luma > FIREFLY_KNEE) {
+        float excess = luma - FIREFLY_KNEE;
+        float compressedLuma = FIREFLY_KNEE + excess / (1.0 + excess / FIREFLY_KNEE);
+        c *= compressedLuma / luma;
+        luma = compressedLuma;
+    }
+
+    float threshold = max(pc.threshold, 0.0);
+    float knee = threshold * clamp(pc.softKnee, 0.0, 1.0);
+    float soft = luma - threshold + knee;
+    soft = clamp(soft, 0.0, 2.0 * knee);
+    soft = (knee > 1.0e-5) ? (soft * soft) / (4.0 * knee + 1.0e-5) : 0.0;
+
+    float contribution = max(soft, luma - threshold);
+    if (contribution <= 0.0) {
+        return vec3(0.0);
+    }
+    return c * (contribution / max(luma, 1.0e-5));
+}
+
+vec3 sampleSource(vec2 uv, float exposure) {
+    vec3 s = texture(srcTex, uv).rgb;
+    if (pc.passIndex == 0) {
+        return prefilterHighlight(s, exposure);
+    }
+    if (any(isnan(s)) || any(isinf(s))) {
+        return vec3(0.0);
+    }
+    return min(max(s, vec3(0.0)), vec3(65504.0));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= pc.dstWidth || pix.y >= pc.dstHeight) {
+        return;
+    }
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(max(pc.dstWidth, 1), max(pc.dstHeight, 1));
+    vec2 texel = 1.0 / vec2(max(pc.srcWidth, 1), max(pc.srcHeight, 1));
+    float exposure = (pc.passIndex == 0) ? max(imageLoad(exposureImage, ivec2(0, 0)).r, 1.0e-4) : 1.0;
+
+    vec3 result;
+    if (pc.quality <= 0) {
+        // Low quality: fast 5-tap dual-filter downsample.
+        vec3 c  = sampleSource(uv, exposure);
+        vec3 tl = sampleSource(uv + vec2(-texel.x, -texel.y), exposure);
+        vec3 tr = sampleSource(uv + vec2( texel.x, -texel.y), exposure);
+        vec3 bl = sampleSource(uv + vec2(-texel.x,  texel.y), exposure);
+        vec3 br = sampleSource(uv + vec2( texel.x,  texel.y), exposure);
+        result = c * 0.5 + (tl + tr + bl + br) * 0.125;
+    } else {
+        // Medium / High / Ultra quality: 13-tap Jimenez downsample across 5 overlapping 2x2 bilinear boxes.
+        vec3 a = sampleSource(uv + vec2(-2.0 * texel.x, -2.0 * texel.y), exposure);
+        vec3 b = sampleSource(uv + vec2( 0.0,           -2.0 * texel.y), exposure);
+        vec3 c = sampleSource(uv + vec2( 2.0 * texel.x, -2.0 * texel.y), exposure);
+        vec3 d = sampleSource(uv + vec2(-1.0 * texel.x, -1.0 * texel.y), exposure);
+        vec3 e = sampleSource(uv + vec2( 1.0 * texel.x, -1.0 * texel.y), exposure);
+        vec3 f = sampleSource(uv + vec2(-2.0 * texel.x,  0.0),           exposure);
+        vec3 g = sampleSource(uv,                                        exposure);
+        vec3 h = sampleSource(uv + vec2( 2.0 * texel.x,  0.0),           exposure);
+        vec3 i = sampleSource(uv + vec2(-1.0 * texel.x,  1.0 * texel.y), exposure);
+        vec3 j = sampleSource(uv + vec2( 1.0 * texel.x,  1.0 * texel.y), exposure);
+        vec3 k = sampleSource(uv + vec2(-2.0 * texel.x,  2.0 * texel.y), exposure);
+        vec3 l = sampleSource(uv + vec2( 0.0,            2.0 * texel.y), exposure);
+        vec3 m = sampleSource(uv + vec2( 2.0 * texel.x,  2.0 * texel.y), exposure);
+
+        vec3 group0 = (d + e + i + j) * 0.25;
+        vec3 group1 = (a + b + f + g) * 0.25;
+        vec3 group2 = (b + c + g + h) * 0.25;
+        vec3 group3 = (f + g + k + l) * 0.25;
+        vec3 group4 = (g + h + l + m) * 0.25;
+
+        if (pc.passIndex == 0 && pc.quality >= 2) {
+            // Normalized Karis partial averaging on pass 0 suppresses sub-pixel path-traced specular
+            // pulsing while preserving full energy on multi-pixel emissive light sources.
+            float w0 = 0.5   * karisWeight(group0);
+            float w1 = 0.125 * karisWeight(group1);
+            float w2 = 0.125 * karisWeight(group2);
+            float w3 = 0.125 * karisWeight(group3);
+            float w4 = 0.125 * karisWeight(group4);
+            float wSum = max(w0 + w1 + w2 + w3 + w4, 1.0e-5);
+            result = (group0 * w0 + group1 * w1 + group2 * w2 + group3 * w3 + group4 * w4) / wSum;
+        } else {
+            result = group0 * 0.5 + (group1 + group2 + group3 + group4) * 0.125;
+        }
+    }
+
+    imageStore(dstImage, pix, vec4(min(max(result, vec3(0.0)), vec3(65504.0)), 1.0));
+}

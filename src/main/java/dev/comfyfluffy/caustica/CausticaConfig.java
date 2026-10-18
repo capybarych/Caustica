@@ -71,7 +71,8 @@ public final class CausticaConfig {
             Rt.Reflex.ENABLED, Rt.Lights.HELD_ITEM_LIGHT, Rt.Lights.DYNAMIC_INTENSITY, Rt.Lights.BLOCK_INTENSITY,
             Rt.Lights.RESTIR_SAMPLING, Rt.Lights.RESTIR_TEMPORAL_HISTORY, Rt.Lights.RESTIR_SPATIAL_NEIGHBOURS,
             Rt.Lights.RESTIR_MAX_AGE, Rt.Hand.FOV_FOLLOWS_CAMERA,
-            Rt.Exposure.MODE, Rt.Tonemapping.OPERATOR, Rt.FrameStats.ENABLED, Rt.Hdr.ENABLED, Ngx.PATH,
+            Rt.Exposure.MODE, Rt.Tonemapping.OPERATOR, Rt.Bloom.ENABLED,
+            Rt.FrameStats.ENABLED, Rt.Hdr.ENABLED, Ngx.PATH,
         };
     }
 
@@ -179,6 +180,12 @@ public final class CausticaConfig {
                 " Scene tonemapping after exposure and before writing the vanilla SDR target. operator selects\n"
                         + " the curve; exposure-ev is an extra post-exposure bias; gamma/saturation/contrast\n"
                         + " are final look controls shared by all operators.");
+        FILE.setComment("bloom",
+                " Screen-space multi-scale HDR bloom applied in exposure-referenced linear space before\n"
+                        + " display tone mapping. enabled toggles the pass; quality selects pyramid depth and\n"
+                        + " filter kernel (low, medium, high, ultra); intensity scales overall bloom strength;\n"
+                        + " threshold and soft-knee control highlight extraction; radius controls multi-octave\n"
+                        + " spread; color-influence adjusts the chromaticity of the glow.");
         FILE.setComment("hdr",
                 " HDR display output (ST.2084/PQ). When enabled the swapchain is created in PQ automatically\n"
                         + " (falls back to SDR if the surface doesn't advertise it). paper-white-nits / peak-nits\n"
@@ -1431,6 +1438,62 @@ public final class CausticaConfig {
                     case "linear", "passthrough", "pass_through", "none" -> "linear";
                     case "psychov", "psycho_v", "psychovisual", "psycho" -> "psychov";
                     default -> "agx";
+                };
+            }
+        }
+
+        /**
+         * Screen-space multi-scale HDR bloom. Runs at display resolution between {@code RtExposure}
+         * and {@code RtDisplayPipeline}, evaluating highlight extraction in exposure-referenced
+         * linear HDR space and compositing back into the linear HDR buffer before SDR/HDR tone mapping.
+         */
+        public static final class Bloom {
+            public static final BooleanSetting ENABLED =
+                    bool("caustica.rt.bloom", "bloom.enabled", true);
+            public static final StringSetting QUALITY =
+                    string("caustica.rt.bloom.quality", "bloom.quality", "high", Bloom::sanitizeQuality);
+            public static final FloatSetting INTENSITY =
+                    clampedFloat("caustica.rt.bloom.intensity", "bloom.intensity", 0.15f, 0.0f, 1.0f);
+            public static final FloatSetting THRESHOLD =
+                    clampedFloat("caustica.rt.bloom.threshold", "bloom.threshold", 1.0f, 0.0f, 10.0f);
+            public static final FloatSetting SOFT_KNEE =
+                    clampedFloat("caustica.rt.bloom.softKnee", "bloom.soft-knee", 0.5f, 0.0f, 1.0f);
+            public static final FloatSetting RADIUS =
+                    clampedFloat("caustica.rt.bloom.radius", "bloom.radius", 0.65f, 0.0f, 1.0f);
+            public static final FloatSetting COLOR_INFLUENCE =
+                    clampedFloat("caustica.rt.bloom.colorInfluence", "bloom.color-influence", 1.0f, 0.0f, 2.0f);
+
+            private Bloom() {
+            }
+
+            public static int qualityIndex() {
+                return switch (QUALITY.get()) {
+                    case "low" -> 0;
+                    case "medium" -> 1;
+                    case "ultra" -> 3;
+                    default -> 2; // high
+                };
+            }
+
+            public static int mipCountForQuality(int qualityIndex) {
+                return switch (qualityIndex) {
+                    case 0 -> 3;
+                    case 1 -> 4;
+                    case 3 -> 6;
+                    default -> 5;
+                };
+            }
+
+            private static String sanitizeQuality(String value) {
+                if (value == null) {
+                    return "high";
+                }
+                return switch (value.trim().toLowerCase(java.util.Locale.ROOT).replace('-', '_')) {
+                    case "low", "0" -> "low";
+                    case "medium", "med", "1" -> "medium";
+                    case "high", "2" -> "high";
+                    case "ultra", "3" -> "ultra";
+                    default -> "high";
                 };
             }
         }
