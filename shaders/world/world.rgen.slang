@@ -512,6 +512,13 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         float3 p = hitPos + n * SURF_BIAS;
         float3 v = -rd; // view direction (toward the camera / incoming ray)
 
+        // Blue-noise dither for this vertex (see blueNoiseTexel in math.slang): xy is the BSDF
+        // direction pair, zw the NEE light-position pair. Reading the tile costs one word and does not
+        // touch the PCG stream, so with no tile published every call site below keeps its exact old
+        // draw order — the tile-absent path stays bit-identical to the white-noise renderer.
+        bool blueNoiseOn = blueNoiseEnabled();
+        float4 blueNoise = blueNoiseTexel(uint2(pix), uint(bounce) * 17u + sampleIndex * 131u);
+
         // Material split. Metals tint F0 by albedo and have no diffuse lobe; dielectrics use a fixed
         // 0.04 F0, sourced from the chit (LabPBR custom/metal F0, or the dielectric default it applies).
         float metal = clamp(payloadMetalness(), 0.0, 1.0);
@@ -631,7 +638,12 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         float3 lightDir = worldPush.lightDir.xyz;
         float lightHalfAngle = worldPush.lightDir.w;
         if (lightHalfAngle > 0.0) {
-            lightDir = sampleSquare(lightDir, lightHalfAngle, seed);
+            // Blue-noise pair when the tile is published: the shadow-ray direction is the first
+            // stochastic event of the vertex and the one penumbrae are built from, so well-distributed
+            // per-pixel samples dissolve the usual speckle in soft shadows.
+            lightDir = blueNoiseOn
+                    ? sampleSquare(lightDir, lightHalfAngle, blueNoise.z, blueNoise.w)
+                    : sampleSquare(lightDir, lightHalfAngle, seed);
         }
         // For dynamic entities (boat interior), use two-sided NDL so interior faces get sun/sky light
         float ndlRaw = dot(n, lightDir);
@@ -859,7 +871,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 l = reflect(rd, n);
                 throughput *= fresnelSchlick(clamp(dot(n, v), 0.0, 1.0), F0) / ps;
             } else {
-                float3 h = sampleGGXVNDF(n, v, rough, seed);
+                float3 h = blueNoiseOn
+                        ? sampleGGXVNDF(n, v, rough, blueNoise.x, blueNoise.y)
+                        : sampleGGXVNDF(n, v, rough, seed);
                 l = reflect(rd, h); // rd = -v: reflect the incoming ray about the microfacet normal
                 float ndl2 = dot(n, l);
                 if (ndl2 <= 0.0) {
@@ -883,7 +897,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         } else {
             throughput *= diffAlb / (1.0 - ps);
             ro = p;
-            rd = cosineDir(n, seed);
+            rd = blueNoiseOn ? cosineDir(n, blueNoise.x, blueNoise.y)
+                             : cosineDir(n, seed);
             rayConeSpread = max(rayConeSpread, RAY_CONE_DIFFUSE_SPREAD);
             showCelestial = false; // diffuse lobe: disc covered by NEE, hide it (anti-firefly)
             if (channel == 0) {

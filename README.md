@@ -16,7 +16,9 @@ unverified.
 ## Features
 
 - Vulkan hardware path-traced world rendering
-- DLSS Ray Reconstruction, DLSS Frame Generation, FSR 3, XeSS and NRD/SVGF denoising
+- DLSS Ray Reconstruction, DLSS Frame Generation, FSR 3, XeSS and NRD/SVGF denoising, with a live
+  Ray Reconstruction model-preset slider (Default / D / E / F)
+- Blue-noise (void-and-cluster) dithering for the path tracer's per-vertex sampling decisions
 - HDR output, SDR/HDR presentation paths and exposure control
 - Dynamic entity rendering in the ray-traced scene
 - LabPBR-style material support, including toggleable subsurface scattering

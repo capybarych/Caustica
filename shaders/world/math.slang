@@ -105,6 +105,45 @@ public float rndf(inout uint s) {
     return float(pcg(s) >> 8u) * (1.0 / 16777216.0);
 }
 
+// ---- Blue-noise dither (RtBlueNoise / WorldPush.blueNoiseAddr) -------------------------------
+//
+// The first stochastic choice at every shading vertex (one BSDF direction pair, one NEE light-position
+// pair) is drawn from a 64x64 blue-noise tile instead of the white-noise PCG stream. Blue noise keeps
+// the same marginal distribution — every channel is an exactly uniform permutation of 0..255 — but
+// puts its energy at high spatial frequencies, so neighbouring pixels receive well-spread samples and
+// the residual error reads as fine dither a denoiser removes easily, rather than clumpy grain. The
+// tile is rotated (toroidally shifted) by frame and sample so a static scene still averages the full
+// sequence over time; that shift is what keeps the estimate unbiased.
+//
+// The remaining decisions (lobe selection, Russian roulette, dielectric branch) deliberately stay on
+// PCG: they are independent draws and reusing a blue-noise component already spent on a direction
+// would correlate two decisions that must be independent.
+public static const int BLUE_NOISE_TILE = 64;
+public static const int BLUE_NOISE_MASK = BLUE_NOISE_TILE - 1;
+
+// One RGBA8 tile texel at (pixel + per-frame/per-sample shift), decoded to 0..1. Returns zero (and
+// reads nothing) when the host published no tile, so callers gate on blueNoiseEnabled() only to
+// choose between the tile value and a PCG draw.
+public float4 blueNoiseTexel(uint2 pixel, uint salt) {
+    if (worldPush.blueNoiseAddr == 0) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    // Odd strides decorrelate adjacent samples/bounces; frameIndex scrolls the whole tile so the
+    // dither pattern is not static on screen.
+    uint2 shifted = pixel + uint2(
+            worldPush.frameIndex * 11u + salt * 7u,
+            worldPush.frameIndex * 7u + salt * 13u);
+    uint tileX = shifted.x & uint(BLUE_NOISE_MASK);
+    uint tileY = shifted.y & uint(BLUE_NOISE_MASK);
+    uint word = ConstPtr<uint>(worldPush.blueNoiseAddr)[tileY * uint(BLUE_NOISE_TILE) + tileX];
+    // Byte levels are exactly uniform over 0..255; the +0.5 maps them to the MIDPOINTS of 256 equal
+    // bins, so the result is uniform over (0, 1) and can never hand a `< probability` test exactly 1.0
+    // (the same failure rndf's 24-bit conversion avoids).
+    float4 levels = float4(float(word & 255u), float((word >> 8u) & 255u),
+            float((word >> 16u) & 255u), float(word >> 24u));
+    return (levels + 0.5) * (1.0 / 256.0);
+}
+
 public float3 primaryRayDir(float2 ndc) {
     float4 nearH = mul(worldPush.invViewProj, float4(ndc.x, ndc.y, 1.0, 1.0));
     float4 farH = mul(worldPush.invViewProj, float4(ndc.x, ndc.y, 0.0, 1.0));
@@ -123,9 +162,8 @@ public float primaryRayConeSpread(float2 ndc, float2 size, float3 dir) {
 // Cosine-weighted hemisphere sample about n (Malley's method). For a Lambertian BRDF this is the
 // importance-sampling match: BRDF*cos/pdf = (albedo/PI)*cos / (cos/PI) = albedo, so the continuation
 // throughput is just *= albedo with no PI/cos bookkeeping left over.
-public float3 cosineDir(float3 n, inout uint s) {
-    float u1 = rndf(s);
-    float u2 = rndf(s);
+// Explicit-pair form: u1/u2 are uniform in [0, 1) — what the blue-noise call sites pass.
+public float3 cosineDir(float3 n, float u1, float u2) {
     float r = sqrt(u1);
     float phi = 6.2831853 * u2;
     float3 t = normalize(abs(n.x) > 0.9 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0));
@@ -135,24 +173,37 @@ public float3 cosineDir(float3 n, inout uint s) {
     return normalize(local.x * t + local.y * b + local.z * n);
 }
 
+// PCG-stream form: two draws from the caller's stream, identical to the pre-blue-noise behaviour.
+public float3 cosineDir(float3 n, inout uint s) {
+    return cosineDir(n, rndf(s), rndf(s));
+}
+
 // Soft shadows: sample a direction within the light's SQUARE angular extent about `axis`. MC's
 // sun/moon are square quads, so the NEE shadow ray samples a square (not a cone) — the same square the
 // visible disc in world.rmiss uses, built from the same celestial tangent frame (right = arc-travel
 // direction, from worldPush.celestial.xyz). Averaged over frames by DLSS-RR this yields soft penumbrae that
 // widen with occluder distance (contact-hardening) for free. halfAngle <= 0 ⇒ exact direction (hard).
-public float3 sampleSquare(float3 axis, float halfAngle, inout uint s) {
+// Explicit-pair form: u/v are two uniform values in [0, 1) (blue-noise components at the call sites
+// that opt in), keeping the same uniform-square distribution over the light's angular extent.
+public float3 sampleSquare(float3 axis, float halfAngle, float u, float v) {
     float3 right = normalize(cross(axis, worldPush.celestial.xyz));
     float3 up = cross(right, axis);
     float t = tan(halfAngle);
-    float u = (rndf(s) * 2.0 - 1.0) * t;
-    float v = (rndf(s) * 2.0 - 1.0) * t;
-    return normalize(axis + u * right + v * up);
+    float su = (u * 2.0 - 1.0) * t;
+    float sv = (v * 2.0 - 1.0) * t;
+    return normalize(axis + su * right + sv * up);
+}
+
+// PCG-stream form: two draws from the caller's stream, identical to the pre-blue-noise behaviour.
+public float3 sampleSquare(float3 axis, float halfAngle, inout uint s) {
+    return sampleSquare(axis, halfAngle, rndf(s), rndf(s));
 }
 
 // Sample a GGX visible-normal (VNDF, Heitz 2018) about geometric normal n for view ve, returning the
 // sampled microfacet normal (half-vector) in world space. Paired with the separable Smith term, the
 // importance-sampling weight reduces to F * G1(NdotL) (applied by the caller).
-public float3 sampleGGXVNDF(float3 n, float3 ve, float alpha, inout uint s) {
+// Explicit-pair form (blue-noise callers): u1/u2 are uniform in [0, 1), same VNDF mapping.
+public float3 sampleGGXVNDF(float3 n, float3 ve, float alpha, float u1, float u2) {
     float3 t = normalize(abs(n.x) > 0.9 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0));
     float3 b = normalize(cross(n, t));
     t = cross(b, n);
@@ -162,8 +213,6 @@ public float3 sampleGGXVNDF(float3 n, float3 ve, float alpha, inout uint s) {
     float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
     float3 T1 = lensq > 0.0 ? float3(-Vh.y, Vh.x, 0.0) * rsqrt(lensq) : float3(1.0, 0.0, 0.0);
     float3 T2 = cross(Vh, T1);
-    float u1 = rndf(s);
-    float u2 = rndf(s);
     float r = sqrt(u1);
     float phi = 6.2831853 * u2;
     float p1 = r * cos(phi);
@@ -173,6 +222,11 @@ public float3 sampleGGXVNDF(float3 n, float3 ve, float alpha, inout uint s) {
     float3 Nh = p1 * T1 + p2 * T2 + sqrt(max(0.0, 1.0 - p1 * p1 - p2 * p2)) * Vh;
     float3 Ne = normalize(float3(a * Nh.x, a * Nh.y, max(0.0, Nh.z))); // microfacet normal, tangent space
     return normalize(Ne.x * t + Ne.y * b + Ne.z * n);                 // -> world space
+}
+
+// PCG-stream form: two draws from the caller's stream, identical to the pre-blue-noise behaviour.
+public float3 sampleGGXVNDF(float3 n, float3 ve, float alpha, inout uint s) {
+    return sampleGGXVNDF(n, ve, alpha, rndf(s), rndf(s));
 }
 
 public float3 srgbToLinear(float3 c) {

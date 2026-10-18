@@ -48,7 +48,10 @@ public final class RtDlssRr {
     private static final int FEATURE_FLAG_AUTO_EXPOSURE = 1 << 6;
     private static final int FEATURE_FLAGS = FEATURE_FLAG_IS_HDR | FEATURE_FLAG_MV_LOW_RES
             | FEATURE_FLAG_DEPTH_INVERTED | FEATURE_FLAG_AUTO_EXPOSURE;
-    // 0 = let the RR DLL pick its per-mode default preset.
+    // NVSDK_NGX_RayReconstruction_Hint_Render_Preset: 0 = let the RR DLL pick its per-mode default,
+    // 4 = Preset D, 5 = Preset E, 6 = Preset F. ensureFeature compares this against the value the live
+    // feature was created with, so moving the slider recreates the feature (and resets history) on the
+    // next frame instead of silently keeping the previous model.
     private static int renderPreset() {
         return CausticaConfig.Rt.DlssRr.PRESET.value();
     }
