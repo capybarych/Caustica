@@ -249,6 +249,22 @@ public WaterWaves evaluateWaterWaves(float3 ro, float3 rd, float hitT, float3 nG
 // Continuation origin that stays on the correct side of BOTH the displaced surface and the rest-plane
 // triangle the BLAS still contains, so a trough cannot immediately re-hit its own mesh on the way out
 // and a crest cannot immediately re-hit it on the way in.
+//
+// A transmitted ray must also start ON the water quad the ray hit. The wave field is a global
+// analytic field but the water body is not: the displaced surface point follows the viewing ray, so
+// at a grazing angle it ends up several blocks OUTSIDE the water quad (the excursion grows like
+// 1/|rd.y|). A refracted ray starting there samples the shore instead of the underwater scene, which
+// is what painted a contour along the water's edge; the transmission guide walks that same ray, so
+// the denoiser demodulated the fringe against the shore's albedo and turned it into a halo.
+//
+// The rest-plane hit is on the quad by construction, so it is over water by definition, and it
+// moves continuously with the hit - unlike a per-block clamp, which snapped the origin to the block
+// edges and pulled the whole block grid into the refraction (stretched corners, worse up close).
+// The wave field still bends the ray: the direction comes from the displaced surface's normal, and
+// the displaced height still sets how deep below the surface the ray starts.
+//
+// The reflection keeps the displaced point: it leaves the surface upwards, where being a block off
+// the water body changes nothing, and the crest is where the specular highlight belongs.
 public float3 waterWaveContinueOrigin(WaterWaves waves, float3 rd, float bias) {
     float3 sideNormal = dot(waves.geometricNormal, rd) >= 0.0
             ? waves.geometricNormal : -waves.geometricNormal;
@@ -259,6 +275,7 @@ public float3 waterWaveContinueOrigin(WaterWaves waves, float3 rd, float bias) {
         if (planeSide < bias) origin += waves.geometricNormal * (bias - planeSide);
     } else {
         if (planeSide > -bias) origin -= waves.geometricNormal * (planeSide + bias);
+        origin.xz = waves.planePos.xz;
     }
     return origin;
 }
