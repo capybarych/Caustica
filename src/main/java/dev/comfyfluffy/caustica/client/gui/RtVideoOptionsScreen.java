@@ -75,6 +75,7 @@ public class RtVideoOptionsScreen extends OptionsSubScreen {
         list.addHeader(DISPLAY_HEADER);
         list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.exposureHeader", RtSubScreens::exposure));
         list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.tonemapHeader", RtSubScreens::tonemap));
+        list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.bloomHeader", RtSubScreens::bloom));
         list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.hdrHeader", RtSubScreens::hdr));
 
         // --- World ---

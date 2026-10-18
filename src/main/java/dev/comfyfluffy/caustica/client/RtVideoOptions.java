@@ -297,6 +297,19 @@ public final class RtVideoOptions {
         };
     }
 
+    /** Screen-space multi-scale HDR bloom options. */
+    public static OptionInstance<?>[] bloomOptions() {
+        return new OptionInstance<?>[] {
+            bloomEnabled(),
+            bloomQuality(),
+            bloomIntensity(),
+            bloomThreshold(),
+            bloomSoftKnee(),
+            bloomRadius(),
+            bloomColorInfluence(),
+        };
+    }
+
     /** Reflex advanced rows for the Frame Generation & Latency sub-screen (Reflex ≤ 20000 µs cap). */
     public static OptionInstance<?>[] reflexOptions() {
         return new OptionInstance<?>[] {
@@ -715,6 +728,46 @@ public final class RtVideoOptions {
     private static OptionInstance<Integer> tonemapContrast() {
         return hundredths("caustica.options.rt.tonemapContrast",
                 CausticaConfig.Rt.Tonemapping.CONTRAST, 0, 300);
+    }
+
+    private static final List<String> BLOOM_QUALITIES =
+            List.of("low", "medium", "high", "ultra");
+
+    private static OptionInstance<Boolean> bloomEnabled() {
+        return bool("caustica.options.rt.bloom", CausticaConfig.Rt.Bloom.ENABLED);
+    }
+
+    private static OptionInstance<String> bloomQuality() {
+        StringSetting setting = CausticaConfig.Rt.Bloom.QUALITY;
+        return new OptionInstance<>(
+            "caustica.options.rt.bloomQuality",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.bloomQuality.tooltip")),
+            (caption, value) -> Component.translatable("caustica.options.rt.bloomQuality." + value),
+            new OptionInstance.Enum<>(BLOOM_QUALITIES, Codec.STRING),
+            BLOOM_QUALITIES.contains(setting.get()) ? setting.get() : "high",
+            setting::set);
+    }
+
+    private static OptionInstance<Integer> bloomIntensity() {
+        return percent("caustica.options.rt.bloomIntensity", CausticaConfig.Rt.Bloom.INTENSITY);
+    }
+
+    private static OptionInstance<Integer> bloomThreshold() {
+        return hundredths("caustica.options.rt.bloomThreshold",
+                CausticaConfig.Rt.Bloom.THRESHOLD, 0, 500);
+    }
+
+    private static OptionInstance<Integer> bloomSoftKnee() {
+        return percent("caustica.options.rt.bloomSoftKnee", CausticaConfig.Rt.Bloom.SOFT_KNEE);
+    }
+
+    private static OptionInstance<Integer> bloomRadius() {
+        return percent("caustica.options.rt.bloomRadius", CausticaConfig.Rt.Bloom.RADIUS);
+    }
+
+    private static OptionInstance<Integer> bloomColorInfluence() {
+        return percentRange("caustica.options.rt.bloomColorInfluence",
+                CausticaConfig.Rt.Bloom.COLOR_INFLUENCE, 0, 200);
     }
 
     private static OptionInstance<Boolean> entities() {
@@ -1361,12 +1414,18 @@ public final class RtVideoOptions {
     }
 
     private static OptionInstance<Integer> percent(String captionKey, FloatSetting setting) {
+        return percentRange(captionKey, setting, 0, 100);
+    }
+
+    private static OptionInstance<Integer> percentRange(
+            String captionKey, FloatSetting setting, int minPct, int maxPct
+    ) {
         return new OptionInstance<>(
             captionKey,
             OptionInstance.cachedConstantTooltip(Component.translatable(captionKey + ".tooltip")),
             (caption, value) -> Options.genericValueLabel(caption, Component.literal(value + "%")),
-            new OptionInstance.IntRange(0, 100),
-            Math.clamp(Math.round(setting.value() * 100.0f), 0, 100),
+            new OptionInstance.IntRange(minPct, maxPct),
+            Math.clamp(Math.round(setting.value() * 100.0f), minPct, maxPct),
             value -> setting.set(value / 100.0f));
     }
 

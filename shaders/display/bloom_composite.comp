@@ -1,0 +1,100 @@
+#version 460
+
+// Final Bloom upsample and scene-linear HDR composition compute shader.
+//
+// Upsamples mip 0 (half resolution) to full display resolution with a tent filter, applies
+// luminance-preserving color influence (0% = neutral white glare, 100% = natural highlight color,
+// >100% = enriched chromatic aura) and intensity scaling, and adds the bloom contribution back
+// into the scene-linear HDR buffer (sceneImage / rrOutput) prior to display tone mapping.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D bloomTex;
+layout(binding = 1, r32f) readonly uniform image2D exposureImage;
+layout(binding = 2, rgba16f) uniform image2D sceneImage;
+
+layout(push_constant) uniform Push {
+    int bloomWidth;
+    int bloomHeight;
+    int width;
+    int height;
+    int quality;
+    float intensity;
+    float radius;
+    float colorInfluence;
+} pc;
+
+const vec3 LUMA_WEIGHTS = vec3(0.2126, 0.7152, 0.0722);
+
+vec3 safeSample(vec2 uv) {
+    vec3 s = texture(bloomTex, uv).rgb;
+    if (any(isnan(s)) || any(isinf(s))) {
+        return vec3(0.0);
+    }
+    return min(max(s, vec3(0.0)), vec3(65504.0));
+}
+
+vec3 sampleTent9(vec2 uv, vec2 d) {
+    vec3 s0 = safeSample(uv + vec2(-d.x, -d.y));
+    vec3 s1 = safeSample(uv + vec2( 0.0, -d.y)) * 2.0;
+    vec3 s2 = safeSample(uv + vec2( d.x, -d.y));
+    vec3 s3 = safeSample(uv + vec2(-d.x,  0.0)) * 2.0;
+    vec3 s4 = safeSample(uv)                    * 4.0;
+    vec3 s5 = safeSample(uv + vec2( d.x,  0.0)) * 2.0;
+    vec3 s6 = safeSample(uv + vec2(-d.x,  d.y));
+    vec3 s7 = safeSample(uv + vec2( 0.0,  d.y)) * 2.0;
+    vec3 s8 = safeSample(uv + vec2( d.x,  d.y));
+    return (s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8) * (1.0 / 16.0);
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= pc.width || pix.y >= pc.height) {
+        return;
+    }
+    if (pc.intensity <= 0.0) {
+        return;
+    }
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(max(pc.width, 1), max(pc.height, 1));
+    vec2 texel = 1.0 / vec2(max(pc.bloomWidth, 1), max(pc.bloomHeight, 1));
+    float r = clamp(pc.radius, 0.0, 1.0);
+    float sampleScale = mix(0.65, 1.45, r);
+    vec2 d = texel * sampleScale;
+
+    vec3 bloom;
+    if (pc.quality <= 0) {
+        vec3 c  = safeSample(uv) * 4.0;
+        vec3 tl = safeSample(uv + vec2(-d.x, -d.y));
+        vec3 tr = safeSample(uv + vec2( d.x, -d.y));
+        vec3 bl = safeSample(uv + vec2(-d.x,  d.y));
+        vec3 br = safeSample(uv + vec2( d.x,  d.y));
+        bloom = (c + tl + tr + bl + br) * (1.0 / 8.0);
+    } else {
+        bloom = sampleTent9(uv, d);
+    }
+
+    // Apply luminance-preserving color influence so adjusting color saturation never shifts
+    // the perceived brightness of the bloom halo.
+    float bloomLuma = dot(bloom, LUMA_WEIGHTS);
+    vec3 tinted = max(mix(vec3(bloomLuma), bloom, max(pc.colorInfluence, 0.0)), vec3(0.0));
+    float tintedLuma = dot(tinted, LUMA_WEIGHTS);
+    if (tintedLuma > 1.0e-5) {
+        tinted *= bloomLuma / tintedLuma;
+    }
+
+    float exposure = max(imageLoad(exposureImage, ivec2(0, 0)).r, 1.0e-4);
+    vec4 scene = imageLoad(sceneImage, pix);
+    vec3 baseHdr = scene.rgb;
+    if (any(isnan(baseHdr)) || any(isinf(baseHdr))) {
+        baseHdr = vec3(0.0);
+    } else {
+        baseHdr = max(baseHdr, vec3(0.0));
+    }
+
+    // Convert exposure-normalized bloom back to scene-linear HDR units before display.comp
+    // applies exposure and the active SDR/HDR tone-mapping operator.
+    vec3 bloomHdr = (tinted * max(pc.intensity, 0.0)) / exposure;
+    vec3 combined = min(baseHdr + bloomHdr, vec3(65504.0));
+    imageStore(sceneImage, pix, vec4(combined, scene.a));
+}

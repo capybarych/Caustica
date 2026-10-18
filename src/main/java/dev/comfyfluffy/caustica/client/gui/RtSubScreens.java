@@ -166,6 +166,14 @@ public final class RtSubScreens {
                 reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.tonemapOptions())));
     }
 
+    /** Screen-space multi-scale HDR bloom controls. */
+    public static RtSettingsSubScreen bloom(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.bloomHeader"),
+                bloomSettings(), RtSubScreens::bloom,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.bloomOptions())));
+    }
+
     /** HDR output and the scene-to-display nit mapping. */
     public static RtSettingsSubScreen hdr(Screen parent) {
         return new RtSettingsSubScreen(parent, options(),
@@ -328,6 +336,17 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Tonemapping.CONTRAST);
     }
 
+    private static List<CausticaConfig.RuntimeSetting<?>> bloomSettings() {
+        return List.of(
+                CausticaConfig.Rt.Bloom.ENABLED,
+                CausticaConfig.Rt.Bloom.QUALITY,
+                CausticaConfig.Rt.Bloom.INTENSITY,
+                CausticaConfig.Rt.Bloom.THRESHOLD,
+                CausticaConfig.Rt.Bloom.SOFT_KNEE,
+                CausticaConfig.Rt.Bloom.RADIUS,
+                CausticaConfig.Rt.Bloom.COLOR_INFLUENCE);
+    }
+
     private static List<CausticaConfig.RuntimeSetting<?>> hdrSettings() {
         return List.of(
                 CausticaConfig.Rt.Hdr.ENABLED,
@@ -372,6 +391,7 @@ public final class RtSubScreens {
                 cloudsSettings(),
                 exposureSettings(),
                 tonemapSettings(),
+                bloomSettings(),
                 hdrSettings(),
                 streamingSettings(),
                 debugSettings(),

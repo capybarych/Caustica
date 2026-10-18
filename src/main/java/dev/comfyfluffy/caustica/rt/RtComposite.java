@@ -64,6 +64,7 @@ import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
+import dev.comfyfluffy.caustica.rt.pipeline.RtBloomPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
@@ -552,6 +553,7 @@ public final class RtComposite {
     private PushSlot[] pushRing;
     private int pushSlot;
     private RtDisplayPipeline displayPipeline;
+    private RtBloomPipeline bloomPipeline;
     private RtImage output;
     // Packed primary -> indirect continuations. Pass A is fixed at one sample and owns two records per
     // render pixel (base + optional transmission); Pass B resamples them at the configured SPP.
@@ -941,6 +943,9 @@ public final class RtComposite {
             if (displayPipeline == null) {
                 displayPipeline = RtDisplayPipeline.create(ctx);
             }
+            if (bloomPipeline == null) {
+                bloomPipeline = RtBloomPipeline.create(ctx);
+            }
             // A resource reload re-stitches the block atlas. We've already torn down the world pipeline
             // (onResourceReloadStart) so nothing references the old atlas, but MC's deferred free keeps the
             // old view handle live for a few frames, then swaps in the new atlas (whose GPU upload may lag,
@@ -958,6 +963,9 @@ public final class RtComposite {
             // manual -> auto at runtime (video settings), the auto-mode histogram/state/pipeline must be
             // allocated before recordFrame's exposure.record() below needs them, or it throws.
             exposure.ensureResources(ctx);
+            if (CausticaConfig.Rt.Bloom.ENABLED.value() && CausticaConfig.Rt.Bloom.INTENSITY.value() > 0.0f) {
+                bloomPipeline.ensureSize(width, height);
+            }
             refreshPipelineShapeIfNeeded(ctx);
             RtPipeline active = ensureWorld(ctx);
             if (materialEpochTraceGate) {
@@ -1487,6 +1495,12 @@ public final class RtComposite {
         // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
         rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
         exposure.ensureResources(ctx);
+        if (bloomPipeline != null) {
+            bloomPipeline.invalidateBindings();
+            if (CausticaConfig.Rt.Bloom.ENABLED.value() && CausticaConfig.Rt.Bloom.INTENSITY.value() > 0.0f) {
+                bloomPipeline.ensureSize(width, height);
+            }
+        }
 
         mvHasPrev = false; // recreated images -> first MV frame is zero
         waterWaveTimeValid = false;
@@ -2113,7 +2127,20 @@ public final class RtComposite {
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
                 exposure.record(ctx, cmd, stack, rrOutput);
             }
-            VulkanCommandEncoder.memoryBarrier(cmd, stack); // exposure image visible to the display mapper
+            VulkanCommandEncoder.memoryBarrier(cmd, stack); // exposure image visible to bloom and display mapper
+
+            // Screen-space multi-scale HDR bloom. Evaluates highlight extraction in exposure-referenced
+            // linear space after exposure metering (so bloom never feeds back into auto-exposure) and
+            // composites back into rrOutput before display tone mapping (so both SDR and HDR10 PQ
+            // outputs receive the tone-mapped bloom). Bypassed for debug views and when disabled.
+            if (debugView == 0 && bloomPipeline != null
+                    && CausticaConfig.Rt.Bloom.ENABLED.value()
+                    && CausticaConfig.Rt.Bloom.INTENSITY.value() > 0.0f) {
+                try (RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.bloom")) {
+                    bloomPipeline.record(cmd, stack, rrOutput, exposure.image());
+                }
+                VulkanCommandEncoder.memoryBarrier(cmd, stack);
+            }
 
             try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
@@ -2808,6 +2835,10 @@ public final class RtComposite {
         destroyRestirResources();
         destroyGuideImages();
         exposure.destroy();
+        if (bloomPipeline != null) {
+            bloomPipeline.destroy();
+            bloomPipeline = null;
+        }
         if (displayPipeline != null) {
             displayPipeline.destroy();
             displayPipeline = null;
