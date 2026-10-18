@@ -82,36 +82,36 @@ final class RtWaterWaveShaderRegressionTest {
      * viewing ray, so at a grazing angle it leaves the water quad the ray hit by several blocks; a
      * refracted ray starting there samples the shore instead of the underwater scene, which is what
      * drew a contour along the water's edge (and made the transmission guide demodulate the fringe
-     * against the shore's albedo, i.e. a halo). The transmitted origin must be pulled back into the
-     * water body, and it must be the shared helper so Pass A, Pass B and the guide walk all get it.
+     * against the shore's albedo, i.e. a halo). The transmitted origin must therefore sit on the
+     * water quad the ray hit.
+     *
+     * <p>The origin must NOT be clamped to the block grid: the quad a ray hit is a single block, but
+     * the water body is not, so a per-block clamp snapped the origin to the block edges and pulled
+     * the whole block grid into the refraction (stretched corners, worse the closer the camera gets).
      */
     @Test
-    void transmittedOriginIsConfinedToTheWaterBody() throws IOException {
+    void transmittedOriginSitsOnTheWaterQuadWithoutTheBlockGrid() throws IOException {
         String water = Files.readString(WATER);
         String origin = slice(water, "public float3 waterWaveContinueOrigin(", "\n}\n");
-        String confine = slice(water, "public float3 waterConfineToWater(", "\n}\n");
-        String footprint = slice(water, "public float4 waterSurfaceFootprint(", "\n}\n");
 
-        assertTrue(origin.contains("waterConfineToWater(waves.planePos, origin)"),
-                "the transmitted origin must be confined to the water body it was sampled from");
-        assertTrue(origin.indexOf("goingOut > 0.0") < origin.indexOf("waterConfineToWater("),
-                "only the ray that enters the volume may be confined; a reflection leaves the surface");
-        assertTrue(confine.contains("clamp(p.xz, lo, hi)"),
-                "the confined origin must be clamped into the water quad's footprint");
-        assertTrue(footprint.contains("floor(planePos.xz + anchor) - anchor"),
-                "the water footprint must be derived from the wave anchor, no extra push data");
-        assertTrue(inset(water) > 0.0,
-                "the confined origin must not sit exactly on the water quad's side face");
+        assertTrue(origin.contains("origin.xz = waves.planePos.xz;"),
+                "the transmitted origin must sit on the rest-plane hit, which is on the water quad");
+        assertTrue(origin.indexOf("goingOut > 0.0") < origin.indexOf("origin.xz = waves.planePos.xz;"),
+                "only the ray that enters the volume may be anchored; a reflection leaves the surface");
+        assertFalse(origin.contains("floor("),
+                "the transmitted origin must not be quantized by the block grid");
+        assertFalse(water.contains("waterConfineToWater(") || water.contains("waterSurfaceFootprint("),
+                "the per-block confinement is gone; it produced a visible grid on the water");
     }
 
     /**
-     * Numeric model of the confinement: the flat-mesh proxy lets the displaced surface point drift
-     * off the water quad, and the confined origin has to end up inside the block the ray hit for
-     * every amplitude, speed and viewing angle the settings allow.
+     * Numeric model of the anchoring: the flat-mesh proxy lets the displaced surface point drift off
+     * the water quad, so a refraction that starts there samples the shore. Anchored on the rest-plane
+     * hit, the origin stays on the quad for every amplitude, speed and viewing angle the settings
+     * allow - and it moves continuously with the hit, so the block grid cannot reach the refraction.
      */
     @Test
-    void confinedOriginStaysInsideTheHitBlockForEveryAllowedSetting() {
-        final double inset = 0.02;
+    void anchoredOriginStaysOnTheWaterQuadForEveryAllowedSetting() {
         final double anchorX = 4096.0 - 137.0;   // the rebase origin modulo 4096
         final double anchorZ = 91.0;
         final double[] strengths = {0.0, 1.0, 2.0, 4.0};
@@ -144,10 +144,9 @@ final class RtWaterWaveShaderRegressionTest {
                             escapedBefore++;
                         }
 
-                        double confinedX = Math.min(Math.max(dispX, blockMinX + inset),
-                                blockMinX + 1.0 - inset);
-                        double confinedZ = Math.min(Math.max(dispZ, blockMinZ + inset),
-                                blockMinZ + 1.0 - inset);
+                        // The anchored origin: the rest-plane hit, which is on the quad by definition.
+                        double confinedX = hitX;
+                        double confinedZ = hitZ;
                         if (confinedX < blockMinX || confinedX > blockMinX + 1.0
                                 || confinedZ < blockMinZ || confinedZ > blockMinZ + 1.0) {
                             escapedAfter++;
@@ -159,7 +158,27 @@ final class RtWaterWaveShaderRegressionTest {
         assertTrue(escapedBefore > 0,
                 "the test must exercise rays whose displaced point leaves the water body");
         assertEquals(0, escapedAfter,
-                "the confined refraction origin must never leave the water block it was sampled from");
+                "the refraction origin must never leave the water quad the ray hit");
+    }
+
+    /**
+     * The refraction origin must not jump when the hit crosses a block boundary: a per-block clamp
+     * made the origin snap to the block edge, which stretched the block corners in the refraction.
+     */
+    @Test
+    void refractionOriginIsContinuousAcrossBlockBoundaries() {
+        double anchorX = 4096.0 - 137.0;
+        double previous = 12.999;
+        for (double hitX = 13.001; hitX < 13.05; hitX += 0.001) {
+            double origin = hitX;   // the anchored origin follows the rest-plane hit
+            assertTrue(Math.abs(origin - previous) < 0.01,
+                    "the refraction origin must vary continuously with the hit, not jump per block");
+            previous = origin;
+        }
+        // The block the hit belongs to changes here, which must not change the origin.
+        assertEquals(Math.floor(12.999 + anchorX) - anchorX + 1.0,
+                Math.floor(13.001 + anchorX) - anchorX,
+                "the test must straddle a block boundary");
     }
 
     private static String slice(String source, String startNeedle, String endNeedle) {
@@ -168,16 +187,6 @@ final class RtWaterWaveShaderRegressionTest {
         int end = source.indexOf(endNeedle, start);
         assertTrue(end > start, "missing shader snippet end: " + endNeedle);
         return source.substring(start, end);
-    }
-
-    /** Reads the numeric value of the WATER_FOOTPRINT_INSET constant out of the shader source. */
-    private static double inset(String water) {
-        String needle = "WATER_FOOTPRINT_INSET = ";
-        int start = water.indexOf(needle);
-        assertTrue(start >= 0, "the water shader must define WATER_FOOTPRINT_INSET");
-        int end = water.indexOf(';', start);
-        assertTrue(end > start, "malformed WATER_FOOTPRINT_INSET constant");
-        return Double.parseDouble(water.substring(start + needle.length(), end).trim());
     }
 
     private static Path repoRoot() {

@@ -29,7 +29,6 @@ public static const float2 WAVE_WIND = normalize(float2(1.0, 0.35)); // dominant
 public static const float WAVE_MEANDER = 1.55;        // crest phase-wobble amplitude (rad) on the long components
 public static const float WAVE_MAX_HEIGHT = 0.55;     // Newton search bound (blocks); > any in-phase crest
 public static const int   WAVE_NEWTON_STEPS = 3;      // height-field ray iterations from the rest-plane hit
-public static const float WATER_FOOTPRINT_INSET = 0.02; // keep a confined refraction origin off the water quad's side face
 // Per-wave steepness a·k: energy stays in the swell. The old 10-octave 0.5 m chop read as the
 // repeating vanilla still-water tile sitting on top of the waves.
 public static const float WAVE_Q[WAVE_COUNT] = { 0.050, 0.058, 0.055, 0.048, 0.036, 0.024, 0.016 };
@@ -247,45 +246,25 @@ public WaterWaves evaluateWaterWaves(float3 ro, float3 rd, float hitT, float3 nG
     return waves;
 }
 
-// The water quad a ray hit belongs to, in the rebased space.
-//
-// The terrain is built from 16^3 sections whose origin is a multiple of 16 and the fluid mesh is
-// emitted in section-local coordinates (pos & 15), so the block that owns a world position starts at
-// floor(world - rebaseOrigin). The wave anchor is the rebase origin modulo 4096 and the wave domain
-// is rebased + anchor, so floor(rebased + anchor) - anchor recovers that same block from inside the
-// shader - no extra push data needed.
-public float4 waterSurfaceFootprint(float3 planePos) {
-    float2 anchor = worldPush.waterAnchor.xy;
-    float2 blockMin = floor(planePos.xz + anchor) - anchor;
-    return float4(blockMin.x, blockMin.y, blockMin.x + 1.0, blockMin.y + 1.0);
-}
-
-// Pull a point that belongs to the water surface back inside the water body it was sampled from.
-//
-// The wave field is a global analytic field but the water body is not: the displaced surface point
-// follows the viewing ray, so at a grazing angle it ends up several blocks OUTSIDE the water quad
-// the ray hit (the excursion grows like 1/|rd.y|, up to a whole block per 0.05 of ray slope). A
-// refracted ray that starts outside the water samples the shore instead of the underwater scene,
-// which is what painted a contour along the water's edge; the transmission guide walks that same
-// ray, so the denoiser demodulated the fringe against the shore's albedo and turned it into a halo.
-// The inset keeps the point off the quad's side face, so the ray does not leave the water on its
-// very first step.
-public float3 waterConfineToWater(float3 planePos, float3 p) {
-    float4 fp = waterSurfaceFootprint(planePos);
-    float2 lo = fp.xy + WATER_FOOTPRINT_INSET;
-    float2 hi = fp.zw - WATER_FOOTPRINT_INSET;
-    float3 confined = p;
-    confined.xz = clamp(p.xz, lo, hi);
-    return confined;
-}
-
 // Continuation origin that stays on the correct side of BOTH the displaced surface and the rest-plane
 // triangle the BLAS still contains, so a trough cannot immediately re-hit its own mesh on the way out
 // and a crest cannot immediately re-hit it on the way in.
 //
-// A transmitted ray must also start inside the WATER: see waterConfineToWater. The reflection leaves
-// the surface upwards, where being a block off the water body changes nothing, so it keeps the
-// displaced point (the crest the camera actually sees, and therefore the specular highlight).
+// A transmitted ray must also start ON the water quad the ray hit. The wave field is a global
+// analytic field but the water body is not: the displaced surface point follows the viewing ray, so
+// at a grazing angle it ends up several blocks OUTSIDE the water quad (the excursion grows like
+// 1/|rd.y|). A refracted ray starting there samples the shore instead of the underwater scene, which
+// is what painted a contour along the water's edge; the transmission guide walks that same ray, so
+// the denoiser demodulated the fringe against the shore's albedo and turned it into a halo.
+//
+// The rest-plane hit is on the quad by construction, so it is over water by definition, and it
+// moves continuously with the hit - unlike a per-block clamp, which snapped the origin to the block
+// edges and pulled the whole block grid into the refraction (stretched corners, worse up close).
+// The wave field still bends the ray: the direction comes from the displaced surface's normal, and
+// the displaced height still sets how deep below the surface the ray starts.
+//
+// The reflection keeps the displaced point: it leaves the surface upwards, where being a block off
+// the water body changes nothing, and the crest is where the specular highlight belongs.
 public float3 waterWaveContinueOrigin(WaterWaves waves, float3 rd, float bias) {
     float3 sideNormal = dot(waves.geometricNormal, rd) >= 0.0
             ? waves.geometricNormal : -waves.geometricNormal;
@@ -296,7 +275,7 @@ public float3 waterWaveContinueOrigin(WaterWaves waves, float3 rd, float bias) {
         if (planeSide < bias) origin += waves.geometricNormal * (bias - planeSide);
     } else {
         if (planeSide > -bias) origin -= waves.geometricNormal * (planeSide + bias);
-        origin = waterConfineToWater(waves.planePos, origin);
+        origin.xz = waves.planePos.xz;
     }
     return origin;
 }
