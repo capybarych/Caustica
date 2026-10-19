@@ -789,15 +789,106 @@ public final class CausticaConfig {
                     string("caustica.rt.cloudStyle", "composite.cloud-style", "classic",
                             Composite::sanitizeCloudStyle);
             /**
-             * Cloud thickness, 0..1, as a fraction of {@link #CLOUD_MAX_THICKNESS_BLOCKS}.
+             * Classic cloud thickness, 0..1, as a fraction of {@code RtComposite}'s declared maximum.
              *
-             * <p>Volumetric: 0 is a flat sheet (the deck collapses to a plane and takes the cheap
-             * non-marched path); 1 is a deep bank. Classic: the slider scales the HEIGHT of vanilla's
-             * authored cell boxes, floored at vanilla's own 4-block extrusion — classic clouds are
-             * always real boxes with lit tops and shaded sides, never thinner than the game draws them.
+             * <p>This is the CLASSIC deck's box height: the slider scales the height of vanilla's
+             * authored cell boxes, floored at vanilla's own 4-block extrusion, so classic clouds are
+             * always real boxes with lit tops and shaded sides. It also sets the flat-sheet deck's depth
+             * when the classic style is drawn flat.
+             *
+             * <p>The volumetric style no longer reads this value: its formations are generated and their
+             * thickness is exactly what {@link #CLOUD_MIN_THICKNESS} and {@link #CLOUD_MAX_THICKNESS}
+             * say, in blocks. The clouds screen hides this row in volumetric mode for that reason.
              */
             public static final FloatSetting CLOUD_THICKNESS =
                     clampedFloat("caustica.rt.cloudThickness", "composite.cloud-thickness", 0.5f, 0.0f, 1.0f);
+            /** Lower bound of the two cloud-thickness sliders, in blocks (the UI's own range too). */
+            public static final int CLOUD_MIN_THICKNESS_BLOCKS = 16;
+            /** Upper bound of the two cloud-thickness sliders, in blocks. */
+            public static final int CLOUD_MAX_THICKNESS_BLOCKS = 22;
+            /** Default for {@link #CLOUD_MIN_THICKNESS}; the ordered pair shares one default range. */
+            private static final int CLOUD_MIN_THICKNESS_DEFAULT = 16;
+            /** Default for {@link #CLOUD_MAX_THICKNESS}. */
+            private static final int CLOUD_MAX_THICKNESS_DEFAULT = 22;
+
+            /**
+             * Thinnest volumetric cloud formation, in blocks (16..22).
+             *
+             * <p>Every generated cloud is assigned its own vertical extent, sampled between this and
+             * {@link #CLOUD_MAX_THICKNESS} by a low-frequency field. The value is used as an actual
+             * geometric extent — it sets how far a formation's density spans above its own base, which
+             * is what the ray march integrates and what the light march shadows through — not as a
+             * density or opacity multiplier.
+             *
+             * <p>The pair is kept ordered: see {@link #setCloudMinThickness(int)}.
+             */
+            public static final IntSetting CLOUD_MIN_THICKNESS =
+                    clampedInt("caustica.rt.cloudMinThickness", "composite.cloud-min-thickness",
+                            CLOUD_MIN_THICKNESS_DEFAULT, CLOUD_MIN_THICKNESS_BLOCKS,
+                            CLOUD_MAX_THICKNESS_BLOCKS);
+            /**
+             * Thickest volumetric cloud formation, in blocks (16..22).
+             *
+             * <p>Equivalent to the minimum at the other end of the same assignment: with both sliders
+             * equal every formation is generated at exactly that thickness, and with a range the deck
+             * contains a natural mixture of shallow puffs and deeper masses. See
+             * {@link #setCloudMaxThickness(int)} for the ordering rule.
+             */
+            public static final IntSetting CLOUD_MAX_THICKNESS =
+                    clampedInt("caustica.rt.cloudMaxThickness", "composite.cloud-max-thickness",
+                            CLOUD_MAX_THICKNESS_DEFAULT, CLOUD_MIN_THICKNESS_BLOCKS,
+                            CLOUD_MAX_THICKNESS_BLOCKS);
+            /**
+             * Set the minimum formation thickness, keeping the pair ordered.
+             *
+             * <p>If the requested minimum is above the current maximum, the maximum is raised to match
+             * rather than the request being clamped: the value the player is dragging is the one they
+             * asked for, and the renderer then uses a genuinely consistent interval. The ordering rule
+             * is what makes "min &lt;= max" an invariant of the stored state rather than a check every
+             * shader has to repeat.
+             */
+            public static void setCloudMinThickness(int blocks) {
+                int min = Math.clamp(blocks, CLOUD_MIN_THICKNESS_BLOCKS, CLOUD_MAX_THICKNESS_BLOCKS);
+                CLOUD_MIN_THICKNESS.set(min);
+                if (CLOUD_MAX_THICKNESS.value() < min) {
+                    CLOUD_MAX_THICKNESS.set(min);
+                }
+            }
+
+            /** Set the maximum formation thickness, lowering the minimum if the interval would invert. */
+            public static void setCloudMaxThickness(int blocks) {
+                int max = Math.clamp(blocks, CLOUD_MIN_THICKNESS_BLOCKS, CLOUD_MAX_THICKNESS_BLOCKS);
+                CLOUD_MAX_THICKNESS.set(max);
+                if (CLOUD_MIN_THICKNESS.value() > max) {
+                    CLOUD_MIN_THICKNESS.set(max);
+                }
+            }
+
+            /**
+             * Repair an out-of-order pair that arrived from outside the sliders (a hand-edited
+             * {@code caustica.toml}, a system property, a reset order). Runs once per frame from
+             * {@code RtComposite.cloudState}; a no-op in the normal case.
+             */
+            public static void reconcileCloudThickness() {
+                int min = CLOUD_MIN_THICKNESS.value();
+                int max = CLOUD_MAX_THICKNESS.value();
+                if (min > max) {
+                    CLOUD_MIN_THICKNESS.set(max);
+                }
+            }
+
+            /** This frame's minimum formation thickness in blocks, after reconciliation. */
+            public static int cloudMinThicknessBlocks() {
+                reconcileCloudThickness();
+                return CLOUD_MIN_THICKNESS.value();
+            }
+
+            /** This frame's maximum formation thickness in blocks, after reconciliation. */
+            public static int cloudMaxThicknessBlocks() {
+                reconcileCloudThickness();
+                return CLOUD_MAX_THICKNESS.value();
+            }
+
             /**
              * How much the cloud deck darkens the sun/moon light reaching the ground beneath it.
              *

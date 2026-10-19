@@ -131,3 +131,178 @@ conflict in `cloudState` and `clouds.slang`.
 - **Volumetric style untouched** per the scope decision: same field, same shape, same constants. Its
   performance ideas from this plan (precomputed light march, cheaper diffuse bounces) are pending user
   sign-off before any change.
+
+---
+
+## Status (2026-10-19) — volumetric shape model replaced
+
+The volumetric style no longer draws a noise field thresholded inside a slab. It generates a **3D
+density distribution** per formation. The classic style is unchanged (authored `clouds.png` cells,
+analytic boxes); everything below applies to `CLOUD_STYLE_VOLUMETRIC` only.
+
+### What the old volumetric deck was
+
+Two things stacked:
+
+1. `cloudCoverageField` — 2D value noise, thresholded by coverage. Every sample in a column shared it,
+   so the cloud had one constant cross-section from base to top.
+2. Inside the slab, `cloudVolumeDensity` multiplied that 2D mask by a **vertical profile** (taper at
+   top and bottom) and added billow noise on the same 12-block lattice. The profile is what made the
+   deck read as *layers*: the silhouette was the 2D field's silhouette, extruded, with a soft top.
+
+### What it is now
+
+Ladder (all powers of two, so every lattice still divides the anchor wrap exactly):
+
+| field | period | role |
+|---|---|---|
+| weather | 192 blocks | where cloud regions are, with real gaps |
+| formation | 96 blocks | per-formation thickness ∈ [min, max] and base offset (0..4 blocks) |
+| warp | 96 blocks | 2D domain warp, growing with height, so masses shear asymmetrically |
+| shape | 24 × 12 blocks (Y compressed) | Perlin fBm 3D: the large rounded body |
+| lobe | 12 × 8 blocks (Y compressed) | Worley fBm 3D (correct 27-cell F1): cauliflower, cavities |
+| detail | 12 blocks | Worley erosion, faded with distance (unchanged) |
+
+Per sample: the coverage field defines the region *and* a `core` gradient (0 at the region's edge, 1 at
+its centre) that lowers the isosurface threshold, so a formation is dense inside and ragged at its rim.
+A per-formation vertical envelope (`CLOUD_CROWN_START` ± `CLOUD_CROWN_VARIANCE`) raises the threshold
+toward each mass's own crown and base, so every cloud closes at its own height instead of being cut by
+the slab. Shape is `lerp(perlin, worley, 0.50)`; erosion removes a fraction proportional to
+`(1 - density)`, which thins the shell and leaves dense cores intact.
+
+The Y anisotropy is the single most important change for silhouette: with an isotropic lattice a
+24-block period over a 16..22-block slab is one feature tall, i.e. a wall. Compressing Y makes each
+lobe roughly 12 blocks tall and 24 wide — oblate, rounded, cumuliform.
+
+### Thickness sliders
+
+`Minimum Cloud Thickness` and `Maximum Cloud Thickness`, 16..22 blocks, in the volumetric section of
+the existing clouds screen, persisted as `composite.cloud-min-thickness` / `composite.cloud-max-thickness`
+and overridable with `-Dcaustica.rt.cloudMinThickness` / `-Dcaustica.rt.cloudMaxThickness`.
+
+- `CausticaConfig.Rt.Composite.setCloudMinThickness/setCloudMaxThickness` keep the pair ordered by
+  pushing the dependent value, so the invariant holds for the slider, TOML, system property and reset
+  paths alike; `reconcileCloudThickness()` repairs a hand-edited file once per frame.
+- `RtComposite.cloudState` pushes the pair in `WorldPush.cloudShape.xy` (a new float4 lane; the struct
+  stride is now 928 bytes, generated from Slang reflection as before) and sizes the march slab from the
+  maximum plus `CLOUD_BASE_JITTER_BLOCKS`.
+- `clouds.slang:cloudFormationThickness` lerps between them per formation, so equal values give every
+  formation exactly that thickness and a range gives a natural mixture.
+- The legacy 0..100 % thickness slider is now shown **only** in the classic style, where it still
+  scales vanilla's box height; in volumetric it would control nothing, so it is hidden rather than left
+  as a dead knob. Coverage remains volumetric-only (classic bakes coverage into the texture).
+
+### Animation
+
+The wind drift is unchanged (0.03 blocks/tick, vanilla parity, anchored/wrapped exactly as before).
+On top of it, `cloudShape.z` slides the 3D lattices through Y at 0.15 blocks/s, wrapped to
+`CLOUD_MORPH_PERIOD_BLOCKS` (24576 = a common multiple of every displaced lattice's Y period:
+12288 for the shape and detail bands, 8192 for the lobes). The rate was chosen
+from measured volume coherence: ~97 % of a cloud's volume is in the same state 1 s later and ~84 %
+after 5 s — it billows over tens of seconds instead of boiling (1.25 blocks/s, the first value tried,
+gave 80 % / 51 %).
+
+### The "cut off" silhouette (reported after the first pass)
+
+Coverage enters as a **threshold on the 2D weather field**, and a threshold is a level set: samples just
+inside it can carry full density while samples just outside carry none. So wherever that contour ran, a
+cloud ended in a near-vertical wall. It was worst at low coverage — a region is then only a couple of
+noise features across (median 113 blocks at 35 % coverage) against lobes 12–24 blocks wide — so the wall
+was a large fraction of the cloud. Measured before the fix at 35 % coverage: full density (1.00) sat
+directly on the contour, and 10–28 % of a scanline's cloud edges lay exactly on it.
+
+Fixed by making the per-formation envelope close horizontally as well as vertically:
+
+```
+envelope = smoothstep(0, 0.12, hf) * (1 - smoothstep(crown, 1, hf)) * smoothstep(threshold, threshold + CLOUD_RIM_BAND, weather)
+```
+
+`CLOUD_RIM_BAND = 0.042` is 8 blocks at the 192-block weather period. Because the envelope already
+reaches 0 where the mass closes, multiplying the rim term in makes the density zero *at* the contour
+too, so the silhouette is the 3D noise's own isosurface and cannot be sliced by a 2D curve. After the
+fix, peak density on the contour is 0.00 at every coverage tested, and no scanline edge sits on the
+contour.
+
+Two things were rejected first:
+
+- **A world-space fade** (distance = value / |grad(value)|) gives the same closure with an exact
+  physical width, but needs two extra coverage evaluations per density sample (compared against
+  ±2 blocks). At 10 march steps x 5 light steps that is 20 % more coverage noise on the hottest path
+  in the renderer. The field is smooth at a 192-block period, so over 8 blocks the constant-band
+  approximation differs by a few percent.
+- **Removing the threshold entirely** (weather biasing the isosurface instead) removes the contour
+  completely and first looked attractive, but it re-parameterises the whole coverage curve: to keep
+  the slider meaning the same thing the bias has to be `coverage * (0.5 - weather)`, which puts the
+  contour back — just rotated — and without it the sky saturates (100 % covered from ~0.6).
+
+Cost: a thin edge is thinned before it closes, so sky coverage seen from above drops a little, and
+slightly more in the middle of the slider than at its ends: 0.4 / 16.5 / 52.5 / 84.7 / 97.3 % at
+slider 0.2 / 0.4 / 0.6 / 0.8 / 1.0, measured with the rim, versus a threshold that saturates at ~97 %
+by 0.8 without it. Full overcast still closes the sky.
+
+### Lighting
+
+Unchanged in structure — per-step light march through the same density, dual-lobe HG, Beer-Lambert,
+three-term multiple scattering, powder term — but it now integrates real 3D density, so self-shadowing
+between lobes is what darkens undersides and cavities. Two follow-ups: the light march takes a
+single-octave density (the optical path through a lobe is a bulk property; the second octave was pure
+cost), and `cloudPowder` now returns the edge weight directly (`exp(-4ρ)`, 1 at thin edges) matching how
+the caller mixes it, instead of a duplicate of the brightening term.
+
+### Verification performed
+
+- `slangc` (the compiler bundled in the `slangpy` wheel, driven through its C API — there is no Vulkan
+  SDK here) compiles every file under `shaders/world` clean, including `clouds.slang`,
+  `world.rgen/rmiss/rchit/rahit` and `world_layout_probe.slang`. Reflection of `world_layout_probe` reports stride **928** with
+  `cloudShape` at **672** and `cloudCellsAddr` at **688**, which is what the regenerated
+  `WorldPushData` will have.
+- An offline numpy transcription of the exact density function (same uint32 hash, same lattice
+  periods, same stage order; constants parsed out of `clouds.slang` so it cannot describe an older
+  tuning) measured the field over a 2 km x 2 km grid:
+  - configured thickness over the interval: 16–22 → mean 19.20, std 2.23; 16–16, 22–22 and 19–19 →
+    exactly constant (std 0.00). Nothing ever falls outside the configured pair.
+  - per-column vertical extent above the formation's *own* base never exceeds that formation's
+    thickness. Observed maxima: 13.61 blocks for a 16-block cap, 18.04 for 22, 16.50 for 20. The
+    extents are *below* the ceiling because the crown envelope closes the mass first — that is the
+    point, and no column reaches its ceiling at all (0.00 % within 0.25 blocks of it).
+  - extent above the deck's base plane peaks at 22.00 blocks, well inside the 26-block slab the
+    renderer pushes (`maxThickness + 4`).
+  - density: 19.0 % occupancy inside formation bounds, 7.9 % saturated, mean 0.76 where present
+    (p10/p50/p90 = 0.23/0.95/1.00) — dense cores, wispy rims.
+  - rim: sampling columns that sit exactly on the coverage contour (85–125 of them per coverage level,
+    at 0.30/0.35/0.45/0.60) finds peak density **0.00** — no cloud is cut by the contour.
+  - animation coherence (IoU of the occupied volume): 0.978 after 1 s, 0.894 after 5 s, 0.619 after
+    30 s at the 0.15 blocks/s churn rate.
+- Ray-marched previews of the transcription (under the deck and from above) were rendered and
+  inspected for silhouette: rounded, asymmetric, non-repeating masses with cauliflower edges, no
+  visible horizontal banding or repeated blobs. This is a contrast check on the density field, not a
+  picture of the game's shading.
+- `CLOUD_ISO_TOP` was raised from 0.72 to 1.0 after this measurement. At 0.72 a thin tail of columns
+  (0.1 %) still reached its exact ceiling — a flush top, the layered silhouette this rework removes.
+  At 1.0, which is the top of the shape field's own range, `smoothstep(1.0, 1.0 + SOFTNESS, shape)` is
+  identically zero at the crown and the base, so closure is structural rather than statistical, and
+  the measurement above shows no column within 0.25 blocks of its ceiling. Cost: ~0.3 block of mean
+  vertical extent.
+- Tests:
+  - `RtCloudThicknessTest` pins the config contract (ranges, defaults, both push directions, equal
+    endpoints, out-of-order repair, registration) and the shader wiring (lerp between the two lanes,
+    density identically zero outside `[base, base + thickness]`, slab sizing, `WorldPush` lane,
+    independence from view distance).
+  - `RtCloudShapeModelTest` recomputes the period ladder from the shader source: every divisor is a
+    power of two, and `CLOUD_MORPH_PERIOD_BLOCKS` is a whole period of every anisotropic Y lattice.
+    It found a real defect while being written — the lobe band's Y period is 8192 blocks, which did
+    **not** divide the 36864 chosen by inspection, so the churn wrap would have snapped the
+    cloudscape every ~8 hours. The period is now 24576 (2 x 12288 = 3 x 8192).
+- **CI passed** on the pull request's first revision: `compileJava` against Minecraft 26.3 (which
+  also runs `generateShaderRecords`, and therefore builds the 928-byte `WorldPushData`), the full
+  `test` suite, `verifyMinecraftAbi`, `jar verifyModJar`, and the bundled-JAR job that compiles every
+  shader with `slangc`. So the Java compiles, the generated push record matches the shader's reflected
+  layout, and the new tests run and pass.
+
+### Not verified
+
+- **The game was not launched.** No rendering behaviour was observed: not the deck's look from any
+  camera angle, not the shader's cost, not the sliders in the real UI. CI explicitly does not touch a
+  GPU.
+- The previews used to judge silhouette and lighting are offline ray-marched renders of the numpy
+  mirror described above, not Minecraft frames.

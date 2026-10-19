@@ -196,21 +196,37 @@ public final class RtVideoOptions {
     }
 
     /**
-     * The clouds sub-screen rows. {@code styleChanged} reopens the screen when the deck style flips,
-     * and the classic deck's coverage slider is left out entirely: coverage is baked into the flat
-     * texture in that style, so showing the row would offer a knob that changes nothing — the
-     * sub-screen replaces it with {@link #cloudCoverageDisabledHint()}'s greyed-out explanation.
-     * Volumetric reads the live coverage field, so the slider stays.
+     * The clouds sub-screen rows, which follow the selected style because the two styles generate
+     * their shapes in completely different ways:
+     *
+     * <ul>
+     *   <li><b>Volumetric</b> generates each cloud as a 3D formation, so it exposes the live coverage
+     *       field and the <b>Minimum</b>/<b>Maximum Cloud Thickness</b> pair (the actual vertical
+     *       extent of the generated formations, in blocks). The legacy 0..100% thickness slider is
+     *       hidden here — it no longer drives the volumetric geometry, and showing it would offer a
+     *       knob that does nothing.</li>
+     *   <li><b>Classic</b> extrudes vanilla's authored {@code clouds.png} cells, so coverage is baked
+     *       into the texture (the sub-screen swaps in {@link #cloudCoverageDisabledHint()}'s greyed-out
+     *       explanation) and the legacy thickness slider is what scales the authored box height.</li>
+     * </ul>
+     *
+     * {@code styleChanged} reopens the screen when the style flips, so the rows trade places
+     * immediately instead of a screen behind.
      */
     public static OptionInstance<?>[] cloudOptions(Runnable styleChanged) {
+        boolean classic = "classic".equals(CausticaConfig.Rt.Composite.CLOUD_STYLE.get());
         List<OptionInstance<?>> options = new ArrayList<>();
         options.add(clouds());
         options.add(cloudStyle(styleChanged));
-        if (!"classic".equals(CausticaConfig.Rt.Composite.CLOUD_STYLE.get())) {
+        if (!classic) {
             options.add(cloudCoverage());
+            options.add(cloudMinThickness());
+            options.add(cloudMaxThickness());
         }
         options.add(cloudHeight());
-        options.add(cloudThickness());
+        if (classic) {
+            options.add(cloudThickness());
+        }
         options.add(cloudShadowStrength());
         options.add(cloudOpacity());
         return options.toArray(OptionInstance<?>[]::new);
@@ -917,14 +933,63 @@ public final class RtVideoOptions {
     }
 
     /**
-     * Cloud thickness, as a percentage of the maximum deck depth. Applies to both styles: 0% is a flat
-     * sheet, 100% is a deep bank you can fly into. Classic clouds become real boxes with lit tops and
-     * darker sides, the way vanilla's cloud geometry looks; volumetric clouds gain the depth their
-     * shading needs. Thicker clouds cost more to march.
+     * Classic cloud thickness, as a percentage of the style's maximum box depth: 0% is the thinnest
+     * deck (still vanilla's own 4-block boxes) and 100% a deep bank you can fly into. Only the classic
+     * style reads it — the volumetric style's thickness is the Min/Max pair below.
      */
     private static OptionInstance<Integer> cloudThickness() {
         return percent("caustica.options.rt.cloudThickness",
                 CausticaConfig.Rt.Composite.CLOUD_THICKNESS);
+    }
+
+    /**
+     * Volumetric formation thickness sliders, in blocks.
+     *
+     * <p>Both rows share the 16..22 range and are independently adjustable; the pair is kept ordered by
+     * {@code CausticaConfig.Rt.Composite.setCloudMinThickness/setCloudMaxThickness}, which push the
+     * dependent value when a drag would cross it. The consumer writes through those methods rather than
+     * straight to the setting, so the invariant holds for every route into the config (slider, TOML,
+     * system property, reset).
+     *
+     * <p>The value shown is the real geometry: it is how many blocks of cloud a formation spans above
+     * its own base, which is what the ray march integrates and the light march shadows through.
+     */
+    private static OptionInstance<Integer> cloudMinThickness() {
+        return cloudThicknessBlocks("caustica.options.rt.cloudMinThickness",
+                CausticaConfig.Rt.Composite.CLOUD_MIN_THICKNESS, true);
+    }
+
+    private static OptionInstance<Integer> cloudMaxThickness() {
+        return cloudThicknessBlocks("caustica.options.rt.cloudMaxThickness",
+                CausticaConfig.Rt.Composite.CLOUD_MAX_THICKNESS, false);
+    }
+
+    private static OptionInstance<Integer> cloudThicknessBlocks(
+            String captionKey, IntSetting setting, boolean minimum) {
+        int lo = CausticaConfig.Rt.Composite.CLOUD_MIN_THICKNESS_BLOCKS;
+        int hi = CausticaConfig.Rt.Composite.CLOUD_MAX_THICKNESS_BLOCKS;
+        return new OptionInstance<>(
+            captionKey,
+            OptionInstance.cachedConstantTooltip(Component.translatable(captionKey + ".tooltip")),
+            // The label reads the CONFIG, not the option's own value. These two rows are coupled: the
+            // setter below pushes the other end of the pair when a drag would invert it, and that push
+            // happens in the config, not in the sibling OptionInstance. Showing the config value is
+            // what makes the pushed row's number update in the same frame, instead of displaying a
+            // stale value until the screen is reopened.
+            (caption, value) -> Options.genericValueLabel(caption,
+                    Component.translatable("caustica.options.rt.cloudThickness.blocks",
+                            minimum
+                                    ? CausticaConfig.Rt.Composite.cloudMinThicknessBlocks()
+                                    : CausticaConfig.Rt.Composite.cloudMaxThicknessBlocks())),
+            new OptionInstance.IntRange(lo, hi),
+            Math.clamp(setting.value(), lo, hi),
+            value -> {
+                if (minimum) {
+                    CausticaConfig.Rt.Composite.setCloudMinThickness(value);
+                } else {
+                    CausticaConfig.Rt.Composite.setCloudMaxThickness(value);
+                }
+            });
     }
 
     /**
