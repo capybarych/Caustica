@@ -110,6 +110,16 @@ public struct WorldPush {
     // riding this same BDA ring slot (0 = unavailable, fall back to the noise deck) — same transport as
     // the DH ready mask, no extra binding.
     public float4   cloudColor;
+    // Volumetric cloud generation parameters (clouds.slang).
+    //   x = minimum formation thickness in blocks, y = maximum formation thickness in blocks.
+    //       These are the Min/Max Cloud Thickness sliders, in the deck's own units (blocks), and they
+    //       drive the actual geometry: each formation's vertical extent is sampled between them, so a
+    //       range produces a deck of clouds of different heights and equal values produce uniform ones.
+    //   z = shape-evolution offset in blocks, already wrapped to the field's churn period. The 3D
+    //       density latices drift through this coordinate slowly, so a cloud billows and morphs in
+    //       place on top of the deck's wind drift.
+    //   w = reserved (0).
+    public float4   cloudShape;
     public uint64_t cloudCellsAddr;
     // Blue-noise dither tile (RtBlueNoise, host side): 64x64 RGBA8 words, R/G = the BSDF direction
     // pair and B/A = the NEE light-position pair. math.slang samples it at pixel coordinates with a

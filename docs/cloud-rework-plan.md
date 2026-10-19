@@ -131,3 +131,124 @@ conflict in `cloudState` and `clouds.slang`.
 - **Volumetric style untouched** per the scope decision: same field, same shape, same constants. Its
   performance ideas from this plan (precomputed light march, cheaper diffuse bounces) are pending user
   sign-off before any change.
+
+---
+
+## Status (2026-10-19) — volumetric shape model replaced
+
+The volumetric style no longer draws a noise field thresholded inside a slab. It generates a **3D
+density distribution** per formation. The classic style is unchanged (authored `clouds.png` cells,
+analytic boxes); everything below applies to `CLOUD_STYLE_VOLUMETRIC` only.
+
+### What the old volumetric deck was
+
+Two things stacked:
+
+1. `cloudCoverageField` — 2D value noise, thresholded by coverage. Every sample in a column shared it,
+   so the cloud had one constant cross-section from base to top.
+2. Inside the slab, `cloudVolumeDensity` multiplied that 2D mask by a **vertical profile** (taper at
+   top and bottom) and added billow noise on the same 12-block lattice. The profile is what made the
+   deck read as *layers*: the silhouette was the 2D field's silhouette, extruded, with a soft top.
+
+### What it is now
+
+Ladder (all powers of two, so every lattice still divides the anchor wrap exactly):
+
+| field | period | role |
+|---|---|---|
+| weather | 192 blocks | where cloud regions are, with real gaps |
+| formation | 96 blocks | per-formation thickness ∈ [min, max] and base offset (0..4 blocks) |
+| warp | 96 blocks | 2D domain warp, growing with height, so masses shear asymmetrically |
+| shape | 24 × 12 blocks (Y compressed) | Perlin fBm 3D: the large rounded body |
+| lobe | 12 × 8 blocks (Y compressed) | Worley fBm 3D (correct 27-cell F1): cauliflower, cavities |
+| detail | 12 blocks | Worley erosion, faded with distance (unchanged) |
+
+Per sample: the coverage field defines the region *and* a `core` gradient (0 at the region's edge, 1 at
+its centre) that lowers the isosurface threshold, so a formation is dense inside and ragged at its rim.
+A per-formation vertical envelope (`CLOUD_CROWN_START` ± `CLOUD_CROWN_VARIANCE`) raises the threshold
+toward each mass's own crown and base, so every cloud closes at its own height instead of being cut by
+the slab. Shape is `lerp(perlin, worley, 0.50)`; erosion removes a fraction proportional to
+`(1 - density)`, which thins the shell and leaves dense cores intact.
+
+The Y anisotropy is the single most important change for silhouette: with an isotropic lattice a
+24-block period over a 16..22-block slab is one feature tall, i.e. a wall. Compressing Y makes each
+lobe roughly 12 blocks tall and 24 wide — oblate, rounded, cumuliform.
+
+### Thickness sliders
+
+`Minimum Cloud Thickness` and `Maximum Cloud Thickness`, 16..22 blocks, in the volumetric section of
+the existing clouds screen, persisted as `composite.cloud-min-thickness` / `composite.cloud-max-thickness`
+and overridable with `-Dcaustica.rt.cloudMinThickness` / `-Dcaustica.rt.cloudMaxThickness`.
+
+- `CausticaConfig.Rt.Composite.setCloudMinThickness/setCloudMaxThickness` keep the pair ordered by
+  pushing the dependent value, so the invariant holds for the slider, TOML, system property and reset
+  paths alike; `reconcileCloudThickness()` repairs a hand-edited file once per frame.
+- `RtComposite.cloudState` pushes the pair in `WorldPush.cloudShape.xy` (a new float4 lane; the struct
+  stride is now 928 bytes, generated from Slang reflection as before) and sizes the march slab from the
+  maximum plus `CLOUD_BASE_JITTER_BLOCKS`.
+- `clouds.slang:cloudFormationThickness` lerps between them per formation, so equal values give every
+  formation exactly that thickness and a range gives a natural mixture.
+- The legacy 0..100 % thickness slider is now shown **only** in the classic style, where it still
+  scales vanilla's box height; in volumetric it would control nothing, so it is hidden rather than left
+  as a dead knob. Coverage remains volumetric-only (classic bakes coverage into the texture).
+
+### Animation
+
+The wind drift is unchanged (0.03 blocks/tick, vanilla parity, anchored/wrapped exactly as before).
+On top of it, `cloudShape.z` slides the 3D lattices through Y at 0.15 blocks/s, wrapped to
+`CLOUD_MORPH_PERIOD_BLOCKS` (24576 = a common multiple of every displaced lattice's Y period:
+12288 for the shape and detail bands, 8192 for the lobes). The rate was chosen
+from measured volume coherence: ~97 % of a cloud's volume is in the same state 1 s later and ~84 %
+after 5 s — it billows over tens of seconds instead of boiling (1.25 blocks/s, the first value tried,
+gave 80 % / 51 %).
+
+### Lighting
+
+Unchanged in structure — per-step light march through the same density, dual-lobe HG, Beer-Lambert,
+three-term multiple scattering, powder term — but it now integrates real 3D density, so self-shadowing
+between lobes is what darkens undersides and cavities. Two follow-ups: the light march takes a
+single-octave density (the optical path through a lobe is a bulk property; the second octave was pure
+cost), and `cloudPowder` now returns the edge weight directly (`exp(-4ρ)`, 1 at thin edges) matching how
+the caller mixes it, instead of a duplicate of the brightening term.
+
+### Verification performed
+
+- `slangc` (via the Vulkan SDK's `slangpy`) compiles `clouds.slang`, `world.rgen/rmiss/rchit/rahit/rmiss`
+  and `world_layout_probe.slang` clean. Reflection of `world_layout_probe` reports stride **928** with
+  `cloudShape` at **672** and `cloudCellsAddr` at **688**, which is what the regenerated
+  `WorldPushData` will have.
+- An offline numpy mirror of the exact density function (same hashes, same constants) was used to
+  measure the field:
+  - configured thickness over a 2 km field: mean 19.25, std 2.25, always within [16, 22]; with
+    min == max every formation is exactly that value.
+  - column-wise vertical extent measured above each formation's *own* base reaches exactly the
+    configured thickness (16.00 for 16, 22.00 for 22, 19.99 for 20) and never exceeds it.
+  - extent above the deck's base plane peaks at 25.75 blocks, inside the 26-block slab the renderer
+    pushes (`maxThickness + 4`), so no formation is clipped by the march bounds.
+  - occupancy inside a formation's bounds 22 %, of which 8.6 % is saturated; mean density where
+    present 0.74 (dense cores, wispy rims).
+- Ray-marched previews of the mirror at low, side and high camera angles were rendered and inspected
+  for silhouette (rounded, asymmetric, non-repeating masses with cavities) — see the PR description.
+- Tests:
+  - `RtCloudThicknessTest` pins the config contract (ranges, defaults, both push directions, equal
+    endpoints, out-of-order repair, registration) and the shader wiring (lerp between the two lanes,
+    density identically zero outside `[base, base + thickness]`, slab sizing, `WorldPush` lane,
+    independence from view distance).
+  - `RtCloudShapeModelTest` recomputes the period ladder from the shader source: every divisor is a
+    power of two, and `CLOUD_MORPH_PERIOD_BLOCKS` is a whole period of every anisotropic Y lattice.
+    It found a real defect while being written — the lobe band's Y period is 8192 blocks, which did
+    **not** divide the 36864 chosen by inspection, so the churn wrap would have snapped the
+    cloudscape every ~8 hours. The period is now 24576 (2 x 12288 = 3 x 8192).
+- **CI passed** on the pull request: `compileJava` against Minecraft 26.3 (which also runs
+  `generateShaderRecords`, and therefore builds the 928-byte `WorldPushData`), the full `test` suite,
+  `verifyMinecraftAbi`, `jar verifyModJar`, and the bundled-JAR job that compiles every shader with
+  `slangc`. So the Java compiles, the generated push record matches the shader's reflected layout, and
+  the new tests run and pass.
+
+### Not verified
+
+- **The game was not launched.** No rendering behaviour was observed: not the deck's look from any
+  camera angle, not the shader's cost, not the sliders in the real UI. CI explicitly does not touch a
+  GPU.
+- The previews used to judge silhouette and lighting are offline ray-marched renders of the numpy
+  mirror described above, not Minecraft frames.

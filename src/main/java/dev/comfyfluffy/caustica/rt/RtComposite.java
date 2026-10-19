@@ -443,37 +443,47 @@ public final class RtComposite {
     private static final float NRD_DENOISING_RANGE = 500000.0f;
     // ---- Cloud deck. These mirror clouds.slang and must stay in lock-step with it.
     //
-    // The classic field repeats every CLOUD_CELL_BLOCKS * CLOUD_PERIOD_CELLS = 12 * 512 = 6144 blocks,
-    // but the VOLUMETRIC field samples the same hash at CLOUD_VOLUMETRIC_SCALE (0.5), so in its own
-    // sampled space 6144 blocks is only half a period. Wrapping the anchor there landed mid-period and
-    // snapped the entire cloudscape to a different pattern — clouds visibly changing shape while
-    // walking, in the volumetric style only.
+    // The volumetric field samples its noise in several different spaces (the weather, formation, warp,
+    // shape, lobe and detail octaves — see the frequency ladder in clouds.slang). Each of those lattices
+    // repeats every CLOUD_PERIOD_CELLS (1024) cells of ITS OWN space, so the shared period is the
+    // coarsest one: the weather field at CLOUD_WEATHER_DIV (16) cells:
     //
-    // The wrap must therefore be a whole period in EVERY space the field is sampled in: the base
-    // octaves, the domain warp, and both billow layers. The binding constraint is the largest octave
-    // divisor (CLOUD_WARP_DIV = 2.0 in clouds.slang):
+    //     period = 1024 cells * 12 blocks/cell * 16 = 196608 blocks
     //
-    //     period = 512 cells * 12 blocks/cell * maxDivisor(2.0) / scale(0.5) = 24576 blocks
-    //
-    // Every divisor there is a power of two, so all of these multiplies are exact in binary floating
-    // point and the wrap identity holds bit-for-bit rather than approximately. Verified: the full
-    // density function (base octaves + warp + billow) is now identical across a wrap to 0.0.
-    private static final double CLOUD_FIELD_PERIOD_BLOCKS = 512.0 * 12.0 * 2.0 / 0.5;
+    // Every divisor is a power of two, so all of these multiplies are exact in binary floating point and
+    // the wrap identity holds bit-for-bit rather than approximately. 196608 is also an exact multiple of
+    // the classic authored map's own 3072-block period (64x), so the classic deck keeps wrapping
+    // cleanly through the same anchor. Wrapping at anything that is not a whole period would snap the
+    // whole cloudscape to a different pattern as the wind scroll crossed the boundary.
+    private static final double CLOUD_FIELD_PERIOD_BLOCKS = 1024.0 * 12.0 * 16.0;
     // Vanilla's clouds drift at 0.03 blocks/tick; matched so the sky moves at a familiar speed.
     private static final double CLOUD_WIND_BLOCKS_PER_TICK = 0.03;
-    // Deck thickness at the slider's 100%. Both styles march a real slab now, so this is the depth the
-    // clouds actually have in the world: at full thickness a bank is tall enough to fly into, while the
-    // slider at 0 collapses the deck to the old flat plane.
-    // Real cumulus is as tall as it is wide, often taller — a bank whose base sits at cloud height can
-    // easily tower 100+ blocks. 40 was too shallow for the deck to ever read as heaped rather than
-    // layered, and since extinction is now normalised by the slab depth (CLOUD_REFERENCE_THICKNESS in
-    // clouds.slang) raising this adds VOLUME without making the clouds more opaque.
-    private static final float CLOUD_MAX_THICKNESS_BLOCKS = 110.0f;
+    // Classic deck depth at the thickness slider's 100%. The classic style still extrudes vanilla's
+    // authored cell boxes, so this is the box height the slider scales from the 4-block floor below.
+    // The volumetric style does NOT use it: its formations are generated and their vertical extent is
+    // the Min/Max Cloud Thickness pair, in blocks, straight from the sliders.
+    private static final float CLOUD_CLASSIC_MAX_THICKNESS_BLOCKS = 110.0f;
     // Classic boxes never get thinner than vanilla's own 4-block extrusion (CloudRenderer's
     // putVec3(12, 4, 12)): the thickness slider scales the box HEIGHT from that baseline up, per the
-    // classic rework's "vanilla shapes, slider-driven depth" decision. Volumetric keeps the full
-    // 0..110 range, including the flat-sheet collapse at zero.
+    // classic rework's "vanilla shapes, slider-driven depth" decision.
     private static final float CLOUD_CLASSIC_MIN_THICKNESS = 4.0f;
+    // Extra slab headroom above the thickest formation, matching CLOUD_BASE_JITTER_BLOCKS in
+    // clouds.slang: each formation may sit up to this far above the deck's base plane, so the bounding
+    // slab the march integrates through has to cover that offset as well as the formation itself.
+    private static final float CLOUD_BASE_JITTER_BLOCKS = 4.0f;
+    // Internal churn speed of the 3D density field and its wrap period, mirroring
+    // CLOUD_MORPH_PERIOD_BLOCKS in clouds.slang. The period is a whole period of every Y lattice the
+    // offset displaces (the common multiple of the shape and detail bands' 12288-block Y period and the
+    // lobe band's 8192-block one), so the wrap is seamless rather than a snap; at this speed that is
+    // ~45 hours of world time, so the loop is never actually observed.
+    //
+    // The speed itself is a compromise measured against the field: the offset slides the noise through
+    // Y, and a formation is only 16..22 blocks tall, so too high a rate re-rolls a cloud's silhouette
+    // while the player watches ("boiling"). 0.15 blocks/s keeps ~97% of a cloud's volume in place one
+    // second later and ~84% after five, i.e. it visibly billows over tens of seconds rather than
+    // flickering. Wind drift (0.03 blocks/tick, ~0.6 blocks/s) remains the dominant motion.
+    private static final double CLOUD_MORPH_BLOCKS_PER_SECOND = 0.15;
+    private static final double CLOUD_MORPH_PERIOD_BLOCKS = 24576.0;
     // Vanilla offsets the deck half a cell minus a sliver in Z (CloudRenderer.render: cameraZ + 3.96),
     // so the camera sits asymmetrically inside the cell grid. Matched for shape-parity with vanilla;
     // the x offset is the wind scroll itself.
@@ -1754,6 +1764,7 @@ public final class RtComposite {
                     clouds.clouds(),
                     clouds.anchor(),
                     clouds.color(),
+                    clouds.shape(),
                     cloudCellsAddress,
                     // Static blue-noise dither tile (WorldPush.blueNoiseAddr) — written once per ring
                     // slot in writeBlueNoise, only the address travels per frame.
@@ -2236,19 +2247,21 @@ public final class RtComposite {
     }
 
     /**
-     * The three {@code WorldPush} cloud lanes, resolved together by {@link #cloudState} so a caller
-     * cannot push a deck's parameters with a mismatched anchor or a mismatched weather fill.
+     * The four {@code WorldPush} cloud lanes, resolved together by {@link #cloudState} so a caller
+     * cannot push a deck's parameters with a mismatched anchor, thickness range or weather fill.
      *
      * @param clouds x player coverage (the slider — the shader folds the weather in itself), y opacity,
      *               z shadow strength, w camera-relative deck height
      * @param anchor xy wrapped sample anchor, z slab thickness, w view limit
      * @param color  xyz vanilla CLOUD_COLOR in linear space, w weather overcast fill 0..1
+     * @param shape  x minimum formation thickness (blocks), y maximum formation thickness (blocks),
+     *               z shape-evolution time (seconds), w reserved
      */
-    private record CloudPush(Float4 clouds, Float4 anchor, Float4 color) {
+    private record CloudPush(Float4 clouds, Float4 anchor, Float4 color, Float4 shape) {
         /** No deck at all: a zeroed coverage/opacity pair short-circuits every cloud path in the shader. */
         static final CloudPush NONE =
                 new CloudPush(new Float4(0f, 0f, 0f, 0f), new Float4(0f, 0f, 0f, 0f),
-                        new Float4(1f, 1f, 1f, 0f));
+                        new Float4(1f, 1f, 1f, 0f), new Float4(0f, 0f, 0f, 0f));
     }
 
     /**
@@ -2518,28 +2531,78 @@ public final class RtComposite {
         // offset matches vanilla's own (cameraZ + 3.96 in CloudRenderer.render).
         double anchorX = camX + drift;
         double anchorZ = camZ + CLOUD_Z_OFFSET_BLOCKS;
-        // Player-controlled thickness. At 0 the shader takes its flat-plane path (see
-        // CLOUD_FLAT_EPSILON in clouds.slang), so the slider bottoming out is genuinely a flat deck
-        // rather than a degenerate zero-length march — that stays true for the volumetric style. The
-        // classic style floors at vanilla's own 4-block box height instead: its shapes come from the
-        // authored clouds.png cells, and the slider scales box HEIGHT from the vanilla baseline up.
-        float thickness = Math.clamp(CausticaConfig.Rt.Composite.CLOUD_THICKNESS.value(), 0f, 1f)
-                * CLOUD_MAX_THICKNESS_BLOCKS;
-        if (CausticaConfig.Rt.Composite.cloudStyleIndex() != CLOUD_STYLE_VOLUMETRIC) {
-            thickness = Math.max(CLOUD_CLASSIC_MIN_THICKNESS, thickness);
+        // Formation thickness.
+        //
+        // Volumetric: straight from the two sliders, in blocks. `maxThickness` is the depth of the
+        // BOUNDING slab the shader marches (each formation may additionally float up to
+        // CLOUD_BASE_JITTER_BLOCKS above the base plane), and the pair itself is handed to the shader in
+        // cloudShape.xy, where cloudFormationThickness turns it into per-formation geometry. Note there
+        // is no "flat sheet at 0%" behaviour here any more: a generated cloud's thickness IS its extent,
+        // and 16 blocks is already the thinnest the sliders allow.
+        //
+        // Classic: the legacy thickness slider scales the height of vanilla's authored cell boxes,
+        // floored at vanilla's own 4-block extrusion, so classic clouds are always real boxes with lit
+        // tops and shaded sides.
+        boolean volumetric = CausticaConfig.Rt.Composite.cloudStyleIndex() == CLOUD_STYLE_VOLUMETRIC;
+        int minThickness = CausticaConfig.Rt.Composite.cloudMinThicknessBlocks();
+        int maxThickness = CausticaConfig.Rt.Composite.cloudMaxThicknessBlocks();
+        float thickness;
+        if (volumetric) {
+            thickness = maxThickness + CLOUD_BASE_JITTER_BLOCKS;
+        } else {
+            thickness = Math.max(CLOUD_CLASSIC_MIN_THICKNESS,
+                    Math.clamp(CausticaConfig.Rt.Composite.CLOUD_THICKNESS.value(), 0f, 1f)
+                            * CLOUD_CLASSIC_MAX_THICKNESS_BLOCKS);
         }
-        // The slider sets the deck's BASE, but the shader's slab is centred on the pushed height, so the
-        // half-thickness is added back here. Pushing the base directly would make the clouds appear to
-        // sink as the thickness slider is raised (the slab would grow downward as well as upward), which
-        // would make the two sliders fight each other — the base is the edge the player actually sees
-        // and judges the height by.
+        // The height slider sets the deck's BASE, but the shader's slab is centred on the pushed height,
+        // so the half-thickness is added back here. Pushing the base directly would make the clouds
+        // appear to sink as the thickness changes (the slab would grow downward as well as upward),
+        // which would make the two controls fight each other — the base is the edge the player actually
+        // sees and judges the height by.
         float deckCentre = height + thickness * 0.5f;
         return new CloudPush(
                 new Float4(Math.clamp(coverage, 0f, 1f), Math.clamp(opacity, 0f, 1f),
                         Math.clamp(shadow, 0f, 1f), (float) (deckCentre - cameraY)),
                 new Float4(wrapCloudAnchor(anchorX), wrapCloudAnchor(anchorZ),
                         thickness, cloudViewLimit(deckCentre - (float) cameraY)),
-                cloudColorState(fill));
+                cloudColorState(fill),
+                new Float4(minThickness, maxThickness, cloudMorphOffsetBlocks(), 0f));
+    }
+
+    /**
+     * Shape-evolution offset for the volumetric field, in blocks.
+     *
+     * <p>This is a separate clock from the wind drift on purpose. The drift translates the whole deck
+     * across the sky; this offset slowly churns the 3D density through the formations, so a cloud's
+     * lobes billow and erode in place instead of the entire cloudscape sliding past as a rigid stamp.
+     * Real clouds do both at once, and having only the first is a large part of why procedural decks
+     * read as "sliding noise".
+     *
+     * <p>Derived from the partial-tick game time (20 ticks/s), so it pauses with the world and needs no
+     * extra state. The result is wrapped to {@link #CLOUD_MORPH_PERIOD_BLOCKS}, which clouds.slang
+     * documents as a whole period of every anisotropic lattice it displaces — so the wrap is invisible
+     * instead of a snap, and the value stays small enough to keep float precision forever.
+     */
+    private static float cloudMorphOffsetBlocks() {
+        var mc = Minecraft.getInstance();
+        if (mc == null) {
+            return 0f;
+        }
+        double gameTime = 0.0;
+        var level = mc.level;
+        if (level != null) {
+            gameTime = level.getGameTime();
+        }
+        gameTime += mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
+        double offset = gameTime / 20.0 * CLOUD_MORPH_BLOCKS_PER_SECOND;
+        offset %= CLOUD_MORPH_PERIOD_BLOCKS;
+        if (offset < 0.0) {
+            offset += CLOUD_MORPH_PERIOD_BLOCKS;
+        }
+        // The shader adds this to a formation-relative height, so it must stay non-negative and below
+        // the period: a full period of every displaced lattice is invisible either way, and keeping it
+        // in range means the offset never grows the float it is added to.
+        return (float) offset;
     }
 
     /**

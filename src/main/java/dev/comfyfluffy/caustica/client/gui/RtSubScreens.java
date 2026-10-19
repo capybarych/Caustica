@@ -296,6 +296,11 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Composite.PARALLAX_DISTANCE);
     }
 
+    /**
+     * Every cloud setting the page can show, in both styles — including the rows the current style
+     * hides. "Reset to Defaults" on this page restores all of them, so flipping style after a reset
+     * never surfaces a stale value.
+     */
     private static List<CausticaConfig.RuntimeSetting<?>> cloudsSettings() {
         return List.of(
                 CausticaConfig.Rt.Composite.CLOUDS,
@@ -303,6 +308,8 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Composite.CLOUD_COVERAGE,
                 CausticaConfig.Rt.Composite.CLOUD_HEIGHT,
                 CausticaConfig.Rt.Composite.CLOUD_THICKNESS,
+                CausticaConfig.Rt.Composite.CLOUD_MIN_THICKNESS,
+                CausticaConfig.Rt.Composite.CLOUD_MAX_THICKNESS,
                 CausticaConfig.Rt.Composite.CLOUD_SHADOW_STRENGTH,
                 CausticaConfig.Rt.Composite.CLOUD_OPACITY);
     }
