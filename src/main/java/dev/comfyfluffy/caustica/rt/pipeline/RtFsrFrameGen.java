@@ -25,9 +25,10 @@ import java.lang.foreign.ValueLayout;
  * GENERATE dispatch producing the single interpolated frame into the presenter's target
  * (multiplier is fixed at 2x — see {@link #MAX_GENERATED_FRAMES} for why the runtime cannot do more).
  *
- * <p>Inputs mirror the FSR upscale conventions already validated in {@code RtFsrUpscaler}:
- * reversed-Z infinite depth (DEPTH_INVERTED | DEPTH_INFINITE), render-pixel motion vectors scaled to
- * UV by the shim, jitter negated, vertical FOV positive.
+ * <p>Inputs mirror the FSR upscale conventions used by {@code RtFsrUpscaler}: reversed-Z infinite
+ * depth (DEPTH_INVERTED | DEPTH_INFINITE), render-pixel motion vectors with an FFX scale argument
+ * of 1 (the provider divides by render size to produce UV-space vectors), jitter negated, and
+ * vertical FOV positive.
  */
 public final class RtFsrFrameGen {
     public static final RtFsrFrameGen INSTANCE = new RtFsrFrameGen();

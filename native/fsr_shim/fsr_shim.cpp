@@ -197,9 +197,10 @@ FSR_SHIM_EXPORT int fsrshim_destroy_upscaler(void* handle) {
 // Records one FSR 3 upscale dispatch: jittered render-res HDR color + reversed-Z depth + render-res
 // motion vectors (+ optional reactive mask) -> display-res output. jitterX/jitterY are the sub-pixel
 // offsets applied to the camera this frame, in render pixels (negated per the FFX sample's
-// convention); motion vectors are render-res pixels, so motionVectorScale is the render dimensions
-// (sample convention again). cameraNear/cameraFar/cameraFovY follow the sample's reversed-Z mapping
-// (near=FLT_MAX, far=the real near plane) — FSR only uses them for the depth linearization
+// convention); motion vectors are render-res pixels, so motionVectorScale is 1.0 — the FFX runtime
+// divides that argument by the render dimensions to produce UV-space motion. cameraNear/cameraFar/
+// cameraFovY follow the sample's reversed-Z mapping (near=FLT_MAX, far=the real near plane) — FSR
+// only uses them for the depth linearization
 // heuristic. The reactive mask marks pixels FSR must not lock its temporal history on (dynamic
 // entities + transmissive surfaces); pass 0 when unavailable.
 FSR_SHIM_EXPORT int fsrshim_dispatch_upscale(void* handle, unsigned long long cmd,
@@ -239,13 +240,12 @@ FSR_SHIM_EXPORT int fsrshim_dispatch_upscale(void* handle, unsigned long long cm
     dispatch.output = makeImageResource((VkImage) outImage, (VkFormat) outFormat,
             upscaleWidth, upscaleHeight, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     dispatch.jitterOffset = { jitterX, jitterY };
-    // FSR multiplies the raw MVs by this scale and adds the result straight to UV space
-    // (prepare_inputs: reprojectedUv = pixelUv + raw*scale), so the scale must convert raw -> UV.
-    // Caustica's gMotion is render-pixel deltas, hence 1/renderSize. NOTE: AMD's fsrapi sample
-    // passes renderSize here, but only because Cauldron pre-divides its MVs by the render size —
-    // copying that value with pixel-space MVs amplifies motion by renderSize^2, which invalidates
-    // the temporal reprojection every camera move (the "screen shakes and noise bursts" symptom).
-    dispatch.motionVectorScale = { 1.0f / renderWidth, 1.0f / renderHeight };
+    // The FFX provider divides this argument by the motion-vector target size before the shader
+    // applies it in UV space. gMotion already stores render-pixel deltas, so {1, 1} produces the
+    // required {1 / renderWidth, 1 / renderHeight} conversion. Passing inverse render size here
+    // divided a second time, making camera motion almost zero to FSR and leaving history stuck on
+    // old frames (the severe ghosting while panning/turning).
+    dispatch.motionVectorScale = { 1.0f, 1.0f };
     dispatch.renderSize = { renderWidth, renderHeight };
     dispatch.upscaleSize = { upscaleWidth, upscaleHeight };
     dispatch.enableSharpening = false; // the display mapper owns the final look; no double sharpening
@@ -467,8 +467,9 @@ FSR_SHIM_EXPORT int fsrshim_fg_prepare(void* handle, unsigned long long cmd,
     prepare.commandList = (void*) cmd;
     prepare.renderSize = { renderWidth, renderHeight };
     prepare.jitterOffset = { jitterX, jitterY };
-    // Same raw->UV convention as the upscale dispatch: gMotion is render-pixel deltas.
-    prepare.motionVectorScale = { 1.0f / renderWidth, 1.0f / renderHeight };
+    // Same FFX normalization as the upscale dispatch: render-pixel MVs use scale {1, 1}; the
+    // frame-generation provider divides by render size to obtain UV-space motion.
+    prepare.motionVectorScale = { 1.0f, 1.0f };
     prepare.frameTimeDelta = frameTimeMs;
     prepare.unused_reset = false;
     prepare.cameraNear = cameraNear;
