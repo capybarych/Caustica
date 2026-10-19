@@ -87,6 +87,26 @@ public final class RtUiOverlay {
         usedThisFrame = false;
     }
 
+    /**
+     * Whether the overlay was prepared (cleared) at least once this frame, i.e. what it holds belongs to
+     * this frame — possibly nothing at all — instead of being a leftover of an earlier one.
+     *
+     * <p>{@link #populatedThisFrame()} cannot answer that for frame generation: the SDR composite consumes
+     * the overlay long before FG records its passes (FG runs at present time, after {@link
+     * #compositeIfUsed()}), so the consumption flag is already false by then. This latch survives
+     * consumption and is reset in {@link #beginFrame()}.
+     *
+     * <p>Why it matters: {@code GuiRenderer.draw} only fetches the destination target when it actually has
+     * draws queued. On a frame with no HUD content — most visibly F1/hide-GUI, where the hand, crosshair,
+     * HUD and world overlays all bail — it returns before the target fetch, so {@link #prepare} never runs
+     * and the overlay keeps the last frame's UI. Stamping that stale image onto generated frames while the
+     * real frame shows none is what made the HUD flash at the frame-generation rate until a screen (Esc)
+     * forced the GUI to draw again.
+     */
+    public static boolean preparedThisFrame() {
+        return overlay != null && overlayClearedThisFrame;
+    }
+
     public static int overlayWidth() {
         return overlay != null ? overlay.width : 0;
     }

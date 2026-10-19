@@ -3458,7 +3458,11 @@ public final class RtComposite {
         long hudlessView = hudlessReady ? hudlessSrc.view : 0L;
         long hudlessImg = hudlessReady ? hudlessSrc.image : 0L;
         int hudlessFmt = hdrBackbuffer ? VK10.VK_FORMAT_R16G16B16A16_SFLOAT : VK10.VK_FORMAT_R8G8B8A8_UNORM;
-        boolean uiReady = RtUiOverlay.overlayWidth() == swapW && RtUiOverlay.overlayHeight() == swapH
+        // `preparedThisFrame` rejects the stale-overlay case: on F1 frames nothing reaches the GUI redirect,
+        // so the texture still holds the HUD from before it was hidden — feeding that to DLSSG would flash
+        // the HUD over a HUD-less real frame at the FG rate.
+        boolean uiReady = RtUiOverlay.preparedThisFrame()
+                && RtUiOverlay.overlayWidth() == swapW && RtUiOverlay.overlayHeight() == swapH
                 && RtUiOverlay.overlayColorView() != 0L && RtUiOverlay.overlayColorImage() != 0L;
         long uiView = uiReady ? RtUiOverlay.overlayColorView() : 0L;
         long uiImg = uiReady ? RtUiOverlay.overlayColorImage() : 0L;
@@ -3664,7 +3668,14 @@ public final class RtComposite {
                     // UI re-composite (hudless path only): stamp this tick's overlay — hand, GUI,
                     // screen effects, mod overlays — onto every generated frame, identical across the
                     // group, which is what stops screen-fixed content from wobbling.
-                    long overlayView = hudlessReady ? RtUiOverlay.overlayColorView() : 0L;
+                    //
+                    // Requires the overlay to have been prepared THIS frame. With the HUD hidden (F1)
+                    // nothing draws into the overlay for the whole frame — GuiRenderer.draw only fetches
+                    // its destination when it has draws queued, and the hand/crosshair/world overlays
+                    // all bail — so the texture would still hold the pre-F1 HUD. Stamping that onto the
+                    // generated frames while the real frame has none made the HUD blink at the FG rate.
+                    long overlayView = hudlessReady && RtUiOverlay.preparedThisFrame()
+                            ? RtUiOverlay.overlayColorView() : 0L;
                     boolean uiReady = overlayView != 0L
                             && RtUiOverlay.overlayWidth() == swapW && RtUiOverlay.overlayHeight() == swapH;
                     if (uiReady && ensureUiSampler(ctx)) {
