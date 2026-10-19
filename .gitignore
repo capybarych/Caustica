@@ -19,3 +19,7 @@ src/main/resources/caustica/natives/**/*.so
 
 # The Gradle wrapper JAR stays tracked.
 !gradle/wrapper/gradle-wrapper.jar
+
+# Python bytecode from the offline cloud-field tooling (tools/), which is run directly.
+__pycache__/
+*.pyc
