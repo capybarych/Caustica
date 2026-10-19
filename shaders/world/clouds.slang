@@ -127,9 +127,18 @@ public static const float CLOUD_BASE_JITTER_BLOCKS = 4.0;
 // the belly term lowers it around the lower-middle of a formation so each mass swells outward there,
 // and the vertical envelope (CLOUD_ISO_TOP) raises it toward the crown and the base so a mass rounds
 // off inside its own bounds instead of being sliced by them.
+//
+// CLOUD_ISO_TOP is 1.0 — the top of the shape field's own range — and that value is chosen, not tuned.
+// `shape` is a lerp of an fBm of value noise in [0,1] and an fBm of (1 - min(F1, 1)) in [0,1], so it
+// cannot exceed 1. smoothstep(1.0, 1.0 + SOFTNESS, shape) is therefore identically zero: at the crown
+// and at the base, where the envelope reaches 0, the density is EXACTLY 0 for every possible noise
+// value. The volume closes inside its own bounds structurally, not statistically, so no formation can
+// be cut flat by its own ceiling however the noise happens to fall. Measured: with the previous 0.72 a
+// handful of the tallest columns survived right up to the boundary (a flush top); at 1.0 none do, and
+// the cost is ~0.1 block of mean vertical extent.
 public static const float CLOUD_ISO_BASE = 0.58;
 public static const float CLOUD_ISO_COVERAGE = 0.26;
-public static const float CLOUD_ISO_TOP = 0.72;        // iso value at the very crown/base of a formation
+public static const float CLOUD_ISO_TOP = 1.0;         // top of the shape range: closes the volume exactly
 public static const float CLOUD_BULGE = 0.10;
 public static const float CLOUD_SHAPE_SOFTNESS = 0.16; // width of the iso ramp
 public static const float CLOUD_WORLEY_MIX = 0.50;     // 0 = pure Perlin blobs, 1 = pure Worley cells

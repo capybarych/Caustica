@@ -28,9 +28,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       one period. If a lattice no longer divides that period, the wrap becomes a discontinuity and
  *       the whole sky jumps whenever the offset rolls over.</li>
  *   <li><b>The crown envelope actually closing.</b> The isosurface threshold is raised toward
- *       {@code CLOUD_ISO_TOP} at the top of a formation. If that value is not above what coverage,
- *       the belly bulge and the noise can already produce, the mass never closes and every cloud ends
- *       at the formation's own ceiling — a flat-topped deck, i.e. the layered look this rework
+ *       {@code CLOUD_ISO_TOP} at the top of a formation, and that value has to be the top of the shape
+ *       field's own range: the field is a lerp of two fBm values in [0, 1], so a threshold of 1.0 is
+ *       unreachable. Any lower value is only *usually* enough — a tall column of noise survives to the
+ *       boundary and the cloud is cut flat by its own ceiling, i.e. the layered look this rework
  *       removed.</li>
  * </ul>
  */
@@ -114,7 +115,20 @@ final class RtCloudShapeModelTest {
                 "CLOUD_ISO_TOP = " + isoTop + " must exceed the lowest attainable threshold ("
                         + lowestIso + "), or the envelope cannot close a dense formation and every"
                         + " cloud would be sliced flat at its own ceiling");
-        assertTrue(isoTop <= 1.0, "CLOUD_ISO_TOP above 1.0 would make the envelope fully opaque");
+
+        // Closure must be structural, not statistical: `shape` is a lerp of an fBm of value noise in
+        // [0,1] and an fBm of (1 - min(F1, 1)) in [0,1], so it can never exceed 1. A threshold of 1.0
+        // therefore makes smoothstep(iso, iso + SOFTNESS, shape) identically zero at the crown and the
+        // base, for every possible noise value — no formation can be cut flat by its own ceiling no
+        // matter how the noise falls. Anything below 1.0 only usually closes: a tall enough column of
+        // noise survives all the way to the boundary and the deck grows a flush-topped patch, which is
+        // exactly the layered silhouette this model exists to avoid.
+        assertTrue(isoTop >= 1.0,
+                "CLOUD_ISO_TOP = " + isoTop + " is below the shape field's own maximum (1.0): the"
+                        + " crown envelope can then be beaten by dense noise and the formation is"
+                        + " sliced flat at its ceiling instead of closing inside it");
+        assertTrue(isoTop <= 1.0,
+                "CLOUD_ISO_TOP above 1.0 is unreachable and would only soften the whole envelope");
     }
 
     @Test

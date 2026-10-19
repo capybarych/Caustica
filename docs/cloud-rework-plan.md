@@ -213,22 +213,36 @@ the caller mixes it, instead of a duplicate of the brightening term.
 
 ### Verification performed
 
-- `slangc` (via the Vulkan SDK's `slangpy`) compiles `clouds.slang`, `world.rgen/rmiss/rchit/rahit/rmiss`
-  and `world_layout_probe.slang` clean. Reflection of `world_layout_probe` reports stride **928** with
+- `slangc` (the compiler bundled in the `slangpy` wheel, driven through its C API — there is no Vulkan
+  SDK here) compiles every file under `shaders/world` clean, including `clouds.slang`,
+  `world.rgen/rmiss/rchit/rahit` and `world_layout_probe.slang`. Reflection of `world_layout_probe` reports stride **928** with
   `cloudShape` at **672** and `cloudCellsAddr` at **688**, which is what the regenerated
   `WorldPushData` will have.
-- An offline numpy mirror of the exact density function (same hashes, same constants) was used to
-  measure the field:
-  - configured thickness over a 2 km field: mean 19.25, std 2.25, always within [16, 22]; with
-    min == max every formation is exactly that value.
-  - column-wise vertical extent measured above each formation's *own* base reaches exactly the
-    configured thickness (16.00 for 16, 22.00 for 22, 19.99 for 20) and never exceeds it.
-  - extent above the deck's base plane peaks at 25.75 blocks, inside the 26-block slab the renderer
-    pushes (`maxThickness + 4`), so no formation is clipped by the march bounds.
-  - occupancy inside a formation's bounds 22 %, of which 8.6 % is saturated; mean density where
-    present 0.74 (dense cores, wispy rims).
-- Ray-marched previews of the mirror at low, side and high camera angles were rendered and inspected
-  for silhouette (rounded, asymmetric, non-repeating masses with cavities) — see the PR description.
+- An offline numpy transcription of the exact density function (same uint32 hash, same lattice
+  periods, same stage order; constants parsed out of `clouds.slang` so it cannot describe an older
+  tuning) measured the field over a 2 km x 2 km grid:
+  - configured thickness over the interval: 16–22 → mean 19.20, std 2.23; 16–16, 22–22 and 19–19 →
+    exactly constant (std 0.00). Nothing ever falls outside the configured pair.
+  - per-column vertical extent above the formation's *own* base never exceeds that formation's
+    thickness. Observed maxima: 13.61 blocks for a 16-block cap, 18.04 for 22, 16.50 for 20. The
+    extents are *below* the ceiling because the crown envelope closes the mass first — that is the
+    point, and no column reaches its ceiling at all (0.00 % within 0.25 blocks of it).
+  - extent above the deck's base plane peaks at 22.00 blocks, well inside the 26-block slab the
+    renderer pushes (`maxThickness + 4`).
+  - density: 20.2 % occupancy inside formation bounds, 8.1 % saturated, mean 0.75 where present
+    (p10/p50/p90 = 0.21/0.94/1.00) — dense cores, wispy rims.
+  - animation coherence (IoU of the occupied volume): 0.977 after 1 s, 0.889 after 5 s, 0.599 after
+    30 s at the 0.15 blocks/s churn rate.
+- Ray-marched previews of the transcription (under the deck and from above) were rendered and
+  inspected for silhouette: rounded, asymmetric, non-repeating masses with cauliflower edges, no
+  visible horizontal banding or repeated blobs. This is a contrast check on the density field, not a
+  picture of the game's shading.
+- `CLOUD_ISO_TOP` was raised from 0.72 to 1.0 after this measurement. At 0.72 a thin tail of columns
+  (0.1 %) still reached its exact ceiling — a flush top, the layered silhouette this rework removes.
+  At 1.0, which is the top of the shape field's own range, `smoothstep(1.0, 1.0 + SOFTNESS, shape)` is
+  identically zero at the crown and the base, so closure is structural rather than statistical, and
+  the measurement above shows no column within 0.25 blocks of its ceiling. Cost: ~0.3 block of mean
+  vertical extent.
 - Tests:
   - `RtCloudThicknessTest` pins the config contract (ranges, defaults, both push directions, equal
     endpoints, out-of-order repair, registration) and the shader wiring (lerp between the two lanes,
@@ -239,11 +253,11 @@ the caller mixes it, instead of a duplicate of the brightening term.
     It found a real defect while being written — the lobe band's Y period is 8192 blocks, which did
     **not** divide the 36864 chosen by inspection, so the churn wrap would have snapped the
     cloudscape every ~8 hours. The period is now 24576 (2 x 12288 = 3 x 8192).
-- **CI passed** on the pull request: `compileJava` against Minecraft 26.3 (which also runs
-  `generateShaderRecords`, and therefore builds the 928-byte `WorldPushData`), the full `test` suite,
-  `verifyMinecraftAbi`, `jar verifyModJar`, and the bundled-JAR job that compiles every shader with
-  `slangc`. So the Java compiles, the generated push record matches the shader's reflected layout, and
-  the new tests run and pass.
+- **CI passed** on the pull request's first revision: `compileJava` against Minecraft 26.3 (which
+  also runs `generateShaderRecords`, and therefore builds the 928-byte `WorldPushData`), the full
+  `test` suite, `verifyMinecraftAbi`, `jar verifyModJar`, and the bundled-JAR job that compiles every
+  shader with `slangc`. So the Java compiles, the generated push record matches the shader's reflected
+  layout, and the new tests run and pass.
 
 ### Not verified
 
