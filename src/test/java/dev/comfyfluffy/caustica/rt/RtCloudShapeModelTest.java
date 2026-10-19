@@ -201,6 +201,14 @@ final class RtCloudShapeModelTest {
         return values;
     }
 
+    private static String slice(String source, String startNeedle, String endNeedle) {
+        int start = source.indexOf(startNeedle);
+        assertTrue(start >= 0, "missing shader snippet start: " + startNeedle);
+        int end = source.indexOf(endNeedle, start);
+        assertTrue(end > start, "missing shader snippet end: " + endNeedle);
+        return source.substring(start, end);
+    }
+
     private static void assertInOrder(String source, String... needles) {
         int at = -1;
         for (String needle : needles) {
