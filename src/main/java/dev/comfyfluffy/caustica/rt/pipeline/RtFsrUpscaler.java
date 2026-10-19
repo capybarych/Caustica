@@ -24,9 +24,10 @@ import java.lang.foreign.ValueLayout;
  * denoiser lands the input is the raw trace (raise SPP to compensate). The UI labels this
  * experimental accordingly.
  *
- * <p>Parameter conventions follow AMD's fsrapi sample exactly: jitter offsets negated, motion
- * vectors in render-pixel units with motionVectorScale = render dimensions, reversed-Z depth mapped
- * to DEPTH_INVERTED + DEPTH_INFINITE with cameraNear=FLT_MAX / cameraFar=the real near plane.
+ * <p>Parameter conventions follow the FFX API: jitter offsets are negated, motion vectors are in
+ * render-pixel units with a motionVectorScale argument of 1 (the FFX provider divides by render size
+ * to produce UV-space vectors), and reversed-Z depth is mapped to DEPTH_INVERTED + DEPTH_INFINITE
+ * with cameraNear=FLT_MAX / cameraFar=the real near plane.
  */
 public final class RtFsrUpscaler {
     public static final RtFsrUpscaler INSTANCE = new RtFsrUpscaler();
