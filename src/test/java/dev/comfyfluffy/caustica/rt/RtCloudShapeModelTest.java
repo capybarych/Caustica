@@ -131,6 +131,45 @@ final class RtCloudShapeModelTest {
                 "CLOUD_ISO_TOP above 1.0 is unreachable and would only soften the whole envelope");
     }
 
+    /**
+     * The coverage contour must not cut a cloud vertically.
+     *
+     * <p>{@code coverage} is a level set through the 2D weather field. Samples just inside it can carry
+     * full density while samples just outside carry none, so wherever that contour runs, a cloud ends in
+     * a near-vertical wall — the "cut off" silhouette. It shows up at every coverage, but low coverage is
+     * worst because a region is then only a couple of noise features across (median 113 blocks at 35 %)
+     * against lobes 12–24 blocks wide, so the wall is a large part of the cloud.
+     *
+     * <p>The fix is that the per-formation envelope is multiplied by a rim term that closes the mass on
+     * the contour the same way the crown closes it vertically. This test pins the structure: a rim factor
+     * derived from the same threshold, folded into the envelope, and wide enough to be a real fade rather
+     * than a token one. Without it the model is back to slicing clouds along a 2D curve.
+     */
+    @Test
+    void coverageContourClosesTheVolumeInsteadOfCuttingIt() throws IOException {
+        String source = Files.readString(CLOUDS);
+        Map<String, Double> c = floats(source);
+        double rimBand = c.get("CLOUD_RIM_BAND");
+        double softness = c.get("CLOUD_EDGE_SOFTNESS");
+
+        assertTrue(rimBand > 0.0,
+                "CLOUD_RIM_BAND must be positive, or the coverage contour cuts clouds into walls");
+        // The band is in weather units; the weather field's finest octave is at a 48-block period, so a
+        // band this wide is several blocks and cannot be a one-sample step.
+        double blocks = rimBand * c.get("CLOUD_CELL_BLOCKS") * c.get("CLOUD_WEATHER_DIV");
+        assertTrue(blocks >= 4.0,
+                "CLOUD_RIM_BAND is only " + blocks + " blocks; a fade that thin still reads as a cut");
+        assertTrue(rimBand < softness,
+                "the rim closure must sit inside the coverage mask ramp, or it would fade away the whole"
+                        + " region rather than just its edge");
+
+        String body = slice(source, "float cloudVolumeDensity(", "// ---- 7. Erosion");
+        assertInOrder(body,
+                "float rim = smoothstep(threshold, threshold + CLOUD_RIM_BAND, weather);",
+                "float envelope = smoothstep(0.0, 0.12, heightFraction)",
+                "* rim;");
+    }
+
     @Test
     void perlinWorleyBlendStaysAMix() throws IOException {
         Map<String, Double> c = floats(Files.readString(CLOUDS));
@@ -160,6 +199,15 @@ final class RtCloudShapeModelTest {
             values.putIfAbsent(m.group(1), Double.parseDouble(m.group(2)));
         }
         return values;
+    }
+
+    private static void assertInOrder(String source, String... needles) {
+        int at = -1;
+        for (String needle : needles) {
+            int next = source.indexOf(needle, at + 1);
+            assertTrue(next > at, "expected snippet after index " + at + ": " + needle);
+            at = next;
+        }
     }
 
     private static boolean isPowerOfTwo(double value) {

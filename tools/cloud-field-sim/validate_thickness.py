@@ -58,7 +58,28 @@ print(f"   occupancy inside formation bounds {d.mean() if False else (d > 0).mea
       f"  saturated {(d >= 0.999).mean():.3f}  mean where present {d[d > 0].mean():.3f}"
       f"  p10/p50/p90 of present {np.round(np.percentile(d[d > 0], [10, 50, 90]), 2)}")
 
-print("\nD. ANIMATION: is the cloudscape coherent frame to frame?")
+print("\nD. RIM: is any cloud sliced by the coverage contour instead of closing on its own noise?")
+# A wall is density that survives right up to the 2D coverage threshold. Sample columns just inside the
+# contour; the rim closure should have faded them to nothing by the time they reach it.
+line = np.linspace(0.0, 400.0, 1600)
+for cov in (0.30, 0.35, 0.45, 0.60):
+    thr = 1.0 - cov
+    peak = 0.0
+    checked = 0
+    for z in np.arange(300.0, 900.0, 75.0):
+        w = f.coverage_field(line, np.full_like(line, z))
+        edge = np.flatnonzero((w - thr > 0.0) & (w - thr < 0.008))[:20]
+        for i in edge:
+            ys_col = np.arange(0.5, 24.0, 0.5)
+            col = f.density(np.full(ys_col.size, line[i]), ys_col, np.full(ys_col.size, z), cov)
+            peak = max(peak, float(col.max()))
+            checked += 1
+    print(f"   coverage {cov:.2f}: {checked:3d} columns on the contour, peak density {peak:.2f}")
+    assert peak < 0.05, (
+        f"density {peak:.2f} survives at the coverage contour for coverage {cov:.2f}: the cloud is cut"
+        " by the 2D weather threshold instead of closing on its own isosurface")
+
+print("\nE. ANIMATION: is the cloudscape coherent frame to frame?")
 m = 60_000
 xs = rng.uniform(0, 900, m); zs = rng.uniform(0, 900, m); ys = rng.uniform(2, 20, m)
 a = f.density(xs, ys, zs) > 0
@@ -66,6 +87,7 @@ for dt in (1.0, 5.0, 30.0):
     b = f.density(xs, ys, zs, morph=0.15 * dt) > 0
     print(f"   +{dt:4.0f}s  IoU {(a & b).sum() / max((a | b).sum(), 1):.3f}")
 
-print("\nE. SLAB: does any formation leave the volume the renderer pushes?")
+print("\nF. SLAB: does any formation leave the volume the renderer pushes?")
 print("   (checked per pair in A; 26 = CLOUD_MAX_THICKNESS_BLOCKS + CLOUD_BASE_JITTER_BLOCKS)")
+
 print("\nALL CHECKS PASSED")

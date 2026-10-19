@@ -147,6 +147,28 @@ public static const float CLOUD_WARP_BLOCKS = 12.0;    // peak domain-warp displ
 // here, varied per formation so neighbouring tops sit at different levels.
 public static const float CLOUD_CROWN_START = 0.55;
 public static const float CLOUD_CROWN_VARIANCE = 0.30;
+// Horizontal rim closure, as a band in WEATHER units (0..1 of the coverage field), applied by the
+// vertical envelope below. 0.042 is 8 blocks at the 192-block weather period.
+//
+// The coverage threshold is a level set through the 2D weather field: at a fixed height the samples
+// just inside it can carry full density while the samples just outside carry none, so a cloud ends in a
+// near-vertical wall wherever that contour happens to run. That is the "cut off" silhouette, and it is
+// worst at low coverage, because a region is then only a couple of noise features across (median 113
+// blocks at 35% coverage) while a lobe is 12-24 blocks wide — so the wall is a large fraction of the
+// cloud. Measured, it capped 48% of edges at 30% coverage with a transition under 3 blocks.
+//
+// Closing the mass over this band makes the silhouette the 3D noise's own isosurface instead of a 2D
+// cut, the same way the crown closes it vertically (the envelope is 0 at the crown and 1 through the
+// body; multiplying the rim term in makes it 0 at the contour too). The band is a fixed width in weather
+// units rather than a world-space distance on purpose: a distance would need |grad(weather)|, i.e. two
+// more coverage evaluations per density sample. The field is smooth at the 192-block weather period, so
+// over 8 blocks the difference is a few percent of the band.
+//
+// The cost is that a thin edge is thinned before it closes, so observed coverage drops a little where
+// the sky is nearly clear or nearly full and slightly more in between (measured, sky covered seen from
+// above: 0.4/16.5/52.5/84.7/97.3% at slider 0.2/0.4/0.6/0.8/1.0). The low end is unchanged one step up
+// in coverage, and full overcast still reaches ~97%.
+public static const float CLOUD_RIM_BAND = 0.042;
 public static const float CLOUD_EROSION = 0.55;        // strength of the detail Worley erosion
 // Internal churn: the shape lattices drift through the formation in Y, so a cloud visibly billows and
 // evolves in place instead of sliding across the sky as a rigid stamp. The deck still drifts at the
@@ -862,8 +884,9 @@ float cloudFormationBase(float2 samplePos) {
  *      "Perlin-Worley" recipe from Horizon/Decima-style cloud renderers.
  *   5. The ISO threshold that turns that field into density is modulated by coverage and by where the
  *      sample sits inside its cloud region (a dense core, thinning toward the rim), by a belly bulge,
- *      and by a per-formation vertical envelope that closes the mass at its own crown height and
- *      frays its base — so no two neighbouring clouds end at the same level.
+ *      and by a per-formation envelope that closes the mass at its own crown height and at the edge of
+ *      its own weather region — so clouds end where their 3D noise ends, not at a contour or a slab
+ *      ceiling, and no two neighbours close at the same level.
  *   6. Erosion breaks the resulting silhouette into fine Cauchy cells and wisps, weighted by
  *      (1 - density) so the shell thins while the core stays solid. It fades with distance
  *      (CLOUD_DETAIL_LOD_*), because sub-pixel detail only aliases at range.
@@ -945,8 +968,13 @@ float cloudVolumeDensity(WorldPush push, float2 samplePos, float yInDeck, float 
     // levels and the deck never reads as a single ceiling.
     float crownNoise = cloudNoise(samplePos / (CLOUD_CELL_BLOCKS * CLOUD_LOBE_DIV) + float2(29.0, 13.0));
     float crown = CLOUD_CROWN_START + CLOUD_CROWN_VARIANCE * (crownNoise - 0.5);
+    // The rim term is what stops the coverage contour from slicing a cloud vertically: see
+    // CLOUD_RIM_BAND. Both factors reach 0 at their own boundary and 1 in the body, so the mass closes
+    // on the noise's own isosurface in every direction.
+    float rim = smoothstep(threshold, threshold + CLOUD_RIM_BAND, weather);
     float envelope = smoothstep(0.0, 0.12, heightFraction)
-            * (1.0 - smoothstep(crown, 1.0, heightFraction));
+            * (1.0 - smoothstep(crown, 1.0, heightFraction))
+            * rim;
 
     // ---- 6. Isosurface. Coverage and the region's own core/edge gradient lower the threshold (a dense
     // core is fat, its outskirts thin); the belly swells the lower middle; the envelope raises the

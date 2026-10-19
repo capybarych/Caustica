@@ -202,6 +202,44 @@ from measured volume coherence: ~97 % of a cloud's volume is in the same state 1
 after 5 s — it billows over tens of seconds instead of boiling (1.25 blocks/s, the first value tried,
 gave 80 % / 51 %).
 
+### The "cut off" silhouette (reported after the first pass)
+
+Coverage enters as a **threshold on the 2D weather field**, and a threshold is a level set: samples just
+inside it can carry full density while samples just outside carry none. So wherever that contour ran, a
+cloud ended in a near-vertical wall. It was worst at low coverage — a region is then only a couple of
+noise features across (median 113 blocks at 35 % coverage) against lobes 12–24 blocks wide — so the wall
+was a large fraction of the cloud. Measured before the fix at 35 % coverage: full density (1.00) sat
+directly on the contour, and 10–28 % of a scanline's cloud edges lay exactly on it.
+
+Fixed by making the per-formation envelope close horizontally as well as vertically:
+
+```
+envelope = smoothstep(0, 0.12, hf) * (1 - smoothstep(crown, 1, hf)) * smoothstep(threshold, threshold + CLOUD_RIM_BAND, weather)
+```
+
+`CLOUD_RIM_BAND = 0.042` is 8 blocks at the 192-block weather period. Because the envelope already
+reaches 0 where the mass closes, multiplying the rim term in makes the density zero *at* the contour
+too, so the silhouette is the 3D noise's own isosurface and cannot be sliced by a 2D curve. After the
+fix, peak density on the contour is 0.00 at every coverage tested, and no scanline edge sits on the
+contour.
+
+Two things were rejected first:
+
+- **A world-space fade** (distance = value / |grad(value)|) gives the same closure with an exact
+  physical width, but needs two extra coverage evaluations per density sample (compared against
+  ±2 blocks). At 10 march steps x 5 light steps that is 20 % more coverage noise on the hottest path
+  in the renderer. The field is smooth at a 192-block period, so over 8 blocks the constant-band
+  approximation differs by a few percent.
+- **Removing the threshold entirely** (weather biasing the isosurface instead) removes the contour
+  completely and first looked attractive, but it re-parameterises the whole coverage curve: to keep
+  the slider meaning the same thing the bias has to be `coverage * (0.5 - weather)`, which puts the
+  contour back — just rotated — and without it the sky saturates (100 % covered from ~0.6).
+
+Cost: a thin edge is thinned before it closes, so sky coverage seen from above drops a little, and
+slightly more in the middle of the slider than at its ends: 0.4 / 16.5 / 52.5 / 84.7 / 97.3 % at
+slider 0.2 / 0.4 / 0.6 / 0.8 / 1.0, measured with the rim, versus a threshold that saturates at ~97 %
+by 0.8 without it. Full overcast still closes the sky.
+
 ### Lighting
 
 Unchanged in structure — per-step light march through the same density, dual-lobe HG, Beer-Lambert,
@@ -229,9 +267,11 @@ the caller mixes it, instead of a duplicate of the brightening term.
     point, and no column reaches its ceiling at all (0.00 % within 0.25 blocks of it).
   - extent above the deck's base plane peaks at 22.00 blocks, well inside the 26-block slab the
     renderer pushes (`maxThickness + 4`).
-  - density: 20.2 % occupancy inside formation bounds, 8.1 % saturated, mean 0.75 where present
-    (p10/p50/p90 = 0.21/0.94/1.00) — dense cores, wispy rims.
-  - animation coherence (IoU of the occupied volume): 0.977 after 1 s, 0.889 after 5 s, 0.599 after
+  - density: 19.0 % occupancy inside formation bounds, 7.9 % saturated, mean 0.76 where present
+    (p10/p50/p90 = 0.23/0.95/1.00) — dense cores, wispy rims.
+  - rim: sampling columns that sit exactly on the coverage contour (85–125 of them per coverage level,
+    at 0.30/0.35/0.45/0.60) finds peak density **0.00** — no cloud is cut by the contour.
+  - animation coherence (IoU of the occupied volume): 0.978 after 1 s, 0.894 after 5 s, 0.619 after
     30 s at the 0.15 blocks/s churn rate.
 - Ray-marched previews of the transcription (under the deck and from above) were rendered and
   inspected for silhouette: rounded, asymmetric, non-repeating masses with cauliflower edges, no

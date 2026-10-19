@@ -42,6 +42,7 @@ CELL_MASK = C["CLOUD_EDGE_SOFTNESS"]
 ISO_BASE = C["CLOUD_ISO_BASE"]
 ISO_COVERAGE = C["CLOUD_ISO_COVERAGE"]
 ISO_TOP = C["CLOUD_ISO_TOP"]
+RIM_BAND = C["CLOUD_RIM_BAND"]
 BULGE = C["CLOUD_BULGE"]
 SOFTNESS = C["CLOUD_SHAPE_SOFTNESS"]
 WORLEY_MIX = C["CLOUD_WORLEY_MIX"]
@@ -188,6 +189,7 @@ def density(sx, y, sz, cov=0.55, min_t=16.0, max_t=22.0, morph=0.0, detail=True,
     if not (mask > 0).any():
         return out
     core = np.clip((weather - threshold) / max(1.0 - threshold, 1.0e-3), 0.0, 1.0)
+    rim = smoothstep(threshold, threshold + RIM_BAND, weather)
 
     thickness = formation_thickness(sx, sz, min_t, max_t)
     base = formation_base(sx, sz)
@@ -195,7 +197,7 @@ def density(sx, y, sz, cov=0.55, min_t=16.0, max_t=22.0, morph=0.0, detail=True,
     act = (mask > 0) & (rel > 0) & (rel < thickness)
     if not act.any():
         return out
-    sx, sz, mask, core = sx[act], sz[act], mask[act], core[act]
+    sx, sz, mask, core, rim = sx[act], sz[act], mask[act], core[act], rim[act]
     rel, thickness = rel[act], thickness[act]
     hf = rel / thickness
 
@@ -218,7 +220,7 @@ def density(sx, y, sz, cov=0.55, min_t=16.0, max_t=22.0, morph=0.0, detail=True,
     crown_noise = noise2(sx / (CELL * C["CLOUD_LOBE_DIV"]) + 29.0,
                          sz / (CELL * C["CLOUD_LOBE_DIV"]) + 13.0)
     crown = CROWN_START + CROWN_VARIANCE * (crown_noise - 0.5)
-    envelope = smoothstep(0.0, 0.12, hf) * (1.0 - smoothstep(crown, 1.0, hf))
+    envelope = smoothstep(0.0, 0.12, hf) * (1.0 - smoothstep(crown, 1.0, hf)) * rim
 
     belly = np.clip(1.0 - np.abs(hf - 0.34) * 2.0, 0.0, 1.0)
     iso_core = ISO_BASE - ISO_COVERAGE * np.sqrt(core) * mask - BULGE * belly

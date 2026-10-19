@@ -42,7 +42,7 @@ def sky(elev):
 
 
 def render(cam, target, w=360, h=240, fov=72, steps=24, lsteps=5, sun=(0.45, 0.70, 0.20),
-           min_t=16.0, max_t=22.0, iso_top=None):
+           min_t=16.0, max_t=22.0, iso_top=None, coverage=0.55):
     cam = np.asarray(cam, float)
     fwd = np.asarray(target, float) - cam
     fwd /= np.linalg.norm(fwd)
@@ -67,13 +67,13 @@ def render(cam, target, w=360, h=240, fov=72, steps=24, lsteps=5, sun=(0.45, 0.7
     step = (tex - ten) / steps
     dither = ((np.arange(dirs.shape[0]) * 2654435761) % 1009) / 1009.0
 
-    kw = dict(min_t=min_t, max_t=max_t, iso_top=iso_top)
+    kw = dict(min_t=min_t, max_t=max_t, iso_top=iso_top, cov=coverage)
     ph = phase(np.clip(dirs @ light, -1, 1))
     col = np.zeros((dirs.shape[0], 3))
     trans = np.ones(dirs.shape[0])
     for i in range(steps):
         p = org + dirs * (ten + step * (i + dither))[:, None]
-        d = f.density(p[:, 0], p[:, 1], p[:, 2], 0.55, **kw)
+        d = f.density(p[:, 0], p[:, 1], p[:, 2], **kw)
         live = d > 0
         if not live.any():
             continue
@@ -82,7 +82,7 @@ def render(cam, target, w=360, h=240, fov=72, steps=24, lsteps=5, sun=(0.45, 0.7
         for k in range(lsteps):
             s = lstep * (k + 0.5)
             tau += f.density(p[:, 0] + light[0] * s, p[:, 1] + light[1] * s,
-                             p[:, 2] + light[2] * s, 0.55, detail=False, **kw)
+                             p[:, 2] + light[2] * s, detail=False, **kw)
         lt = ms(tau * SIGMA * lstep)
         powder = 1.0 - POWDER * np.exp(-d * 4.0)
         sunl = (lt * ph * powder * 26.0)[:, None] * np.array([1.0, 0.97, 0.90])
