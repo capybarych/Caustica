@@ -349,9 +349,7 @@ NGX_SHIM_EXPORT int ngxshim_query_optimal_dlssd(unsigned int displayWidth, unsig
 // Creates a DLSS Ray Reconstruction (DLSSD) feature. Configured for our path tracer: DL-unified
 // denoise, roughness packed into normals.w, and HW (non-linear, reversed-Z) depth — the rgen writes
 // ndc z/w, shared with Frame Generation. renderPreset is an NVSDK_NGX_RayReconstruction_Hint_Render_Preset
-// value (0 = DLL default, 4 = preset D, 5 = preset E, 6 = preset F; A/B/C were removed by NVIDIA and
-// everything past F reverts to default behavior). Non-zero values are pushed into every per-quality
-// hint lane below, so the manager's own per-mode defaults never override the picked model.
+// value (0 = DLL default).
 NGX_SHIM_EXPORT void* ngxshim_create_dlssd(VkCommandBuffer cmd,
                                            unsigned int renderWidth, unsigned int renderHeight,
                                            unsigned int displayWidth, unsigned int displayHeight,

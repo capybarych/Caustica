@@ -1,7 +1,7 @@
 package dev.comfyfluffy.caustica.rt.pipeline;
 
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
+import com.mojang.blaze3d.vulkan.VulkanDevice;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtContext;
@@ -33,7 +33,11 @@ public final class RtDlssRr {
      * answer, so flipping the toggle can never leave the trace sized for RR while RR is not running.
      */
     public static boolean enabled() {
-        return CausticaConfig.Rt.DlssRr.ENABLED.value() && CausticaConfig.Rt.Composite.DENOISER.value();
+        // A missing NGX shim/SDK or an unsupported driver must disable only RR, never the path tracer.
+        // queryOptimalRenderSize() latches `failed` and the composite then allocates its 1:1 + SVGF path.
+        return CausticaConfig.Rt.DlssRr.ENABLED.value()
+                && CausticaConfig.Rt.Composite.DENOISER.value()
+                && !INSTANCE.failed;
     }
 
     // DLSS feature flags. IsHDR (bit 0): color is linear HDR (rgba16f) — RR requires it ("HDR Color
@@ -48,10 +52,7 @@ public final class RtDlssRr {
     private static final int FEATURE_FLAG_AUTO_EXPOSURE = 1 << 6;
     private static final int FEATURE_FLAGS = FEATURE_FLAG_IS_HDR | FEATURE_FLAG_MV_LOW_RES
             | FEATURE_FLAG_DEPTH_INVERTED | FEATURE_FLAG_AUTO_EXPOSURE;
-    // NVSDK_NGX_RayReconstruction_Hint_Render_Preset: 0 = let the RR DLL pick its per-mode default,
-    // 4 = Preset D, 5 = Preset E, 6 = Preset F. ensureFeature compares this against the value the live
-    // feature was created with, so moving the slider recreates the feature (and resets history) on the
-    // next frame instead of silently keeping the previous model.
+    // 0 = let the RR DLL pick its per-mode default preset.
     private static int renderPreset() {
         return CausticaConfig.Rt.DlssRr.PRESET.value();
     }
@@ -163,37 +164,44 @@ public final class RtDlssRr {
 
     /**
      * Asks NGX what render resolution the current quality mode expects for the given display size.
-     * Returns {@code null} only when RR is off (or already disabled from an earlier failure elsewhere)
-     * — in that state there is no feature to query and the caller should trace at full resolution.
-     * Once RR is active, a failed query (stale shim, old driver, bad NGX result) throws instead of
-     * silently falling back, so a broken render/display sync is never masked.
+     * Returns {@code null} when RR is off or when its optional NGX backend cannot initialize/query.
+     * In the latter case RR is latched off for this session, and the caller should trace at full
+     * resolution with the built-in denoiser rather than disabling the independent path tracer.
      */
     public int[] queryOptimalRenderSize(int displayWidth, int displayHeight) {
-        if (!enabled() || failed) {
+        if (!enabled()) {
             return null;
         }
         if (!(((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device)) {
+            failed = true;
+            CausticaMod.LOGGER.warn("DLSS-RR backend is unavailable; using the built-in path-tracing fallback");
             return null;
         }
-        ensureInitialized(device);
-        if (!lib.hasQueryOptimalDlssd()) {
-            throw new IllegalStateException("ngxshim is missing ngxshim_query_optimal_dlssd (stale native shim)");
-        }
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment outWidth = arena.allocate(ValueLayout.JAVA_INT);
-            MemorySegment outHeight = arena.allocate(ValueLayout.JAVA_INT);
-            MemorySegment outSharpness = arena.allocate(ValueLayout.JAVA_FLOAT);
-            int rc = lib.queryOptimalDlssd(displayWidth, displayHeight, quality(), outWidth, outHeight, outSharpness);
-            if (NgxRuntime.ngxFailed(rc)) {
-                throw new IllegalStateException("ngxshim_query_optimal_dlssd failed: 0x" + Integer.toHexString(rc));
+        try {
+            ensureInitialized(device);
+            if (!lib.hasQueryOptimalDlssd()) {
+                throw new IllegalStateException("ngxshim is missing ngxshim_query_optimal_dlssd (stale native shim)");
             }
-            int renderWidth = outWidth.get(ValueLayout.JAVA_INT, 0);
-            int renderHeight = outHeight.get(ValueLayout.JAVA_INT, 0);
-            if (renderWidth <= 0 || renderHeight <= 0) {
-                throw new IllegalStateException(
-                        "ngxshim_query_optimal_dlssd returned invalid render size " + renderWidth + "x" + renderHeight);
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment outWidth = arena.allocate(ValueLayout.JAVA_INT);
+                MemorySegment outHeight = arena.allocate(ValueLayout.JAVA_INT);
+                MemorySegment outSharpness = arena.allocate(ValueLayout.JAVA_FLOAT);
+                int rc = lib.queryOptimalDlssd(displayWidth, displayHeight, quality(), outWidth, outHeight, outSharpness);
+                if (NgxRuntime.ngxFailed(rc)) {
+                    throw new IllegalStateException("ngxshim_query_optimal_dlssd failed: 0x" + Integer.toHexString(rc));
+                }
+                int renderWidth = outWidth.get(ValueLayout.JAVA_INT, 0);
+                int renderHeight = outHeight.get(ValueLayout.JAVA_INT, 0);
+                if (renderWidth <= 0 || renderHeight <= 0) {
+                    throw new IllegalStateException(
+                            "ngxshim_query_optimal_dlssd returned invalid render size " + renderWidth + "x" + renderHeight);
+                }
+                return new int[] { renderWidth, renderHeight };
             }
-            return new int[] { renderWidth, renderHeight };
+        } catch (Throwable t) {
+            failed = true;
+            CausticaMod.LOGGER.warn("DLSS-RR unavailable; continuing with full-resolution path tracing and built-in denoising", t);
+            return null;
         }
     }
 

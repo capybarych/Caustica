@@ -1,10 +1,10 @@
 package dev.comfyfluffy.caustica.rt;
 
-import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
-import com.mojang.renderpearl.backend.vulkan.VulkanPhysicalDevice;
-import com.mojang.renderpearl.backend.vulkan.VulkanUtils;
-import com.mojang.renderpearl.backend.vulkan.init.VulkanFeature;
-import com.mojang.renderpearl.backend.vulkan.init.VulkanPNextStruct;
+import com.mojang.blaze3d.vulkan.VulkanDevice;
+import com.mojang.blaze3d.vulkan.VulkanPhysicalDevice;
+import com.mojang.blaze3d.vulkan.VulkanUtils;
+import com.mojang.blaze3d.vulkan.init.VulkanFeature;
+import com.mojang.blaze3d.vulkan.init.VulkanPNextStruct;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import org.lwjgl.PointerBuffer;
@@ -22,10 +22,10 @@ import org.lwjgl.vulkan.VK12;
 import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkDeviceCreateInfo;
 import org.lwjgl.vulkan.VkDeviceDiagnosticsConfigCreateInfoNV;
-import org.lwjgl.vulkan.VkDeviceFaultAddressInfoKHR;
+import org.lwjgl.vulkan.VkDeviceFaultAddressInfoEXT;
 import org.lwjgl.vulkan.VkDeviceFaultCountsEXT;
 import org.lwjgl.vulkan.VkDeviceFaultInfoEXT;
-import org.lwjgl.vulkan.VkDeviceFaultVendorInfoKHR;
+import org.lwjgl.vulkan.VkDeviceFaultVendorInfoEXT;
 import org.lwjgl.vulkan.VkInstanceCreateInfo;
 import org.lwjgl.vulkan.VkLayerProperties;
 import org.lwjgl.vulkan.VkPhysicalDeviceFaultFeaturesEXT;
@@ -36,6 +36,7 @@ import org.lwjgl.vulkan.VkPhysicalDeviceProperties;
 import org.lwjgl.vulkan.VkQueueFamilyProperties;
 import org.lwjgl.vulkan.VkCheckpointDataNV;
 import org.lwjgl.vulkan.VkQueue;
+import org.spongepowered.asm.mixin.injection.invoke.arg.Args;
 
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
@@ -48,6 +49,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -179,22 +181,31 @@ public final class VulkanDiagnostics {
         }
     }
 
-    public static void addDeviceFaultFeature(Set<VulkanFeature> features) {
+    @SuppressWarnings("unchecked")
+    public static void addDeviceFaultFeature(Args args) {
         if (!deviceFaultRequested && !nvDiagnosticsRequested) {
             return;
         }
+        Set<VulkanFeature> features = new HashSet<>((Set<VulkanFeature>) args.get(2));
         if (deviceFaultRequested) {
-            VulkanPNextStruct faultStruct = new VulkanPNextStruct(VkPhysicalDeviceFaultFeaturesEXT.class);
-            features.add(new VulkanFeature(faultStruct, "deviceFault"));
+            VulkanPNextStruct faultStruct = new VulkanPNextStruct(
+                    EXTDeviceFault.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT,
+                    VkPhysicalDeviceFaultFeaturesEXT.SIZEOF);
+            features.add(new VulkanFeature(faultStruct, "deviceFault",
+                    VkPhysicalDeviceFaultFeaturesEXT.DEVICEFAULT));
             if (deviceFaultVendorBinaryRequested) {
-                features.add(new VulkanFeature(faultStruct, "deviceFaultVendorBinary"));
+                features.add(new VulkanFeature(faultStruct, "deviceFaultVendorBinary",
+                        VkPhysicalDeviceFaultFeaturesEXT.DEVICEFAULTVENDORBINARY));
             }
         }
         if (nvDiagnosticsRequested) {
-            VulkanPNextStruct diagnosticsStruct =
-                    new VulkanPNextStruct(VkPhysicalDeviceDiagnosticsConfigFeaturesNV.class);
-            features.add(new VulkanFeature(diagnosticsStruct, "diagnosticsConfig"));
+            VulkanPNextStruct diagnosticsStruct = new VulkanPNextStruct(
+                    NVDeviceDiagnosticsConfig.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DIAGNOSTICS_CONFIG_FEATURES_NV,
+                    VkPhysicalDeviceDiagnosticsConfigFeaturesNV.SIZEOF);
+            features.add(new VulkanFeature(diagnosticsStruct, "diagnosticsConfig",
+                    VkPhysicalDeviceDiagnosticsConfigFeaturesNV.DIAGNOSTICSCONFIG));
         }
+        args.set(2, features);
     }
 
     /** Prepend NVIDIA's device-create diagnostics flags while vanilla's creation stack is alive. */
@@ -311,10 +322,10 @@ public final class VulkanDiagnostics {
                 CausticaMod.LOGGER.warn("Capping Vulkan fault records to {} (driver reported address={}, vendor={})",
                         MAX_FAULT_RECORDS, counts.addressInfoCount(), counts.vendorInfoCount());
             }
-            VkDeviceFaultAddressInfoKHR.Buffer addresses = addressCount == 0
-                    ? null : VkDeviceFaultAddressInfoKHR.calloc(addressCount, stack);
-            VkDeviceFaultVendorInfoKHR.Buffer vendors = vendorCount == 0
-                    ? null : VkDeviceFaultVendorInfoKHR.calloc(vendorCount, stack);
+            VkDeviceFaultAddressInfoEXT.Buffer addresses = addressCount == 0
+                    ? null : VkDeviceFaultAddressInfoEXT.calloc(addressCount, stack);
+            VkDeviceFaultVendorInfoEXT.Buffer vendors = vendorCount == 0
+                    ? null : VkDeviceFaultVendorInfoEXT.calloc(vendorCount, stack);
             long requestedVendorBytes = deviceFaultVendorBinaryRequested
                     && counts.vendorBinarySize() <= MAX_VENDOR_BINARY_BYTES ? counts.vendorBinarySize() : 0L;
             if (counts.vendorBinarySize() > MAX_VENDOR_BINARY_BYTES) {
@@ -342,7 +353,7 @@ public final class VulkanDiagnostics {
                     info.descriptionString(), counts.addressInfoCount(), counts.vendorInfoCount(), counts.vendorBinarySize());
             if (addresses != null) {
                 for (int i = 0; i < Math.min(addressCount, counts.addressInfoCount()); i++) {
-                    VkDeviceFaultAddressInfoKHR address = addresses.get(i);
+                    VkDeviceFaultAddressInfoEXT address = addresses.get(i);
                     String resource = resolveBuffer(address.reportedAddress());
                     CausticaMod.LOGGER.error("Vulkan fault address[{}]: type={}, address=0x{}, precision=0x{}, resource={}",
                             i, addressType(address.addressType()), Long.toUnsignedString(address.reportedAddress(), 16),
@@ -351,7 +362,7 @@ public final class VulkanDiagnostics {
             }
             if (vendors != null) {
                 for (int i = 0; i < Math.min(vendorCount, counts.vendorInfoCount()); i++) {
-                    VkDeviceFaultVendorInfoKHR vendor = vendors.get(i);
+                    VkDeviceFaultVendorInfoEXT vendor = vendors.get(i);
                     CausticaMod.LOGGER.error("Vulkan vendor fault[{}]: description='{}', code=0x{}, data=0x{}",
                             i, vendor.descriptionString(), Long.toUnsignedString(vendor.vendorFaultCode(), 16),
                             Long.toUnsignedString(vendor.vendorFaultData(), 16));

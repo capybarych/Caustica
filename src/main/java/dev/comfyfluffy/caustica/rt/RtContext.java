@@ -1,8 +1,8 @@
 package dev.comfyfluffy.caustica.rt;
 
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
-import com.mojang.renderpearl.backend.vulkan.VulkanQueue;
+import com.mojang.blaze3d.vulkan.VulkanDevice;
+import com.mojang.blaze3d.vulkan.VulkanQueue;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.mixin.GpuDeviceAccessor;
 import org.lwjgl.PointerBuffer;
@@ -284,18 +284,13 @@ public final class RtContext {
             if (hostVisible) {
                 aci.flags(hostAccessFlags | Vma.VMA_ALLOCATION_CREATE_MAPPED_BIT);
             }
-            if (addressAlignment != 0L) {
-                // LWJGL's VMA binding does not expose vmaCreateBufferWithAlignment (the alignment
-                // overload lives in the C API only), so ask for a dedicated block instead: its base
-                // address sits on a whole-memory page, which satisfies AS scratch / SBT granularity.
-                // The resulting address is still verified below and creation fails loudly if a driver
-                // hands back something coarser than the request.
-                aci.flags(aci.flags() | Vma.VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT);
-            }
             LongBuffer pBuf = stack.mallocLong(1);
             PointerBuffer pAlloc = stack.mallocPointer(1);
             VmaAllocationInfo info = VmaAllocationInfo.calloc(stack);
-            check(Vma.vmaCreateBuffer(vma, bci, aci, pBuf, pAlloc, info), "vmaCreateBuffer");
+            int createResult = addressAlignment == 0L
+                    ? Vma.vmaCreateBuffer(vma, bci, aci, pBuf, pAlloc, info)
+                    : Vma.vmaCreateBufferWithAlignment(vma, bci, aci, addressAlignment, pBuf, pAlloc, info);
+            check(createResult, addressAlignment == 0L ? "vmaCreateBuffer" : "vmaCreateBufferWithAlignment");
             handle = pBuf.get(0);
             allocation = pAlloc.get(0);
             RtDebugLabels.nameBuffer(this, handle, label);

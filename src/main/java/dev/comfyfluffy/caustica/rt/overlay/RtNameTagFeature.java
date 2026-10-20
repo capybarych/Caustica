@@ -1,8 +1,8 @@
 package dev.comfyfluffy.caustica.rt.overlay;
 
-import com.mojang.renderpearl.api.textures.GpuTextureView;
+import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vertex.VertexConsumer;
-import com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView;
+import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
 
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
@@ -269,11 +269,6 @@ final class RtNameTagFeature implements RtOverlayFeature {
             vu = u;
             vv = v;
             return this;
-        }
-
-        @Override
-        public VertexConsumer setUv3(float u, float v) {
-            return this; // name-tag glyphs carry a single UV layer; UV3 is unused here
         }
 
         @Override

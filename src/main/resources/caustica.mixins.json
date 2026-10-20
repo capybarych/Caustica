@@ -6,10 +6,11 @@
 	"client": [
 		"BlockModelRenderStateMixin",
 		"BlockModelResolverMixin",
+		"CommandEncoderAccessor",
 		"DistantHorizonsLodBufferMixin",
 		"GameRendererMixin",
 		"GpuDeviceAccessor",
-		"RenderSystemMixin",
+		"GlxMixin",
 		"GuiRendererMixin",
 		"LevelRendererMixin",
 		"LevelExtractorMixin",
@@ -28,7 +29,8 @@
 		"VulkanBackendMixin",
 		"VulkanGpuSurfaceMixin",
 		"VulkanInstanceMixin",
-		"VulkanUtilsMixin"
+		"VulkanUtilsMixin",
+		"VulkanGpuTextureAccessor"
 	],
 	"injectors": {
 		"defaultRequire": 1

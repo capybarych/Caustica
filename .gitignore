@@ -2,24 +2,11 @@
 .idea/
 /build/
 /buildSrc/build/
-native/*/build/
+native/ngx_shim/build/
 run/
 out/
-logs/
-/logs
-third_party/
-bin/
 *.log
 *.class
-
-# Vendor upscaler runtimes are never committed. CI stages them from the official SDKs
-# (NVIDIA/DLSS, AMD FidelityFX, Intel XeSS) into build/native/*/release before bundling.
-src/main/resources/caustica/natives/**/*.dll
-src/main/resources/caustica/natives/**/*.so
-
-# The Gradle wrapper JAR stays tracked.
-!gradle/wrapper/gradle-wrapper.jar
-
-# Python bytecode from the offline cloud-field tooling (tools/), which is run directly.
-__pycache__/
-*.pyc
+third_party/
+bin/
+/logs

@@ -1,11 +1,11 @@
 package dev.comfyfluffy.caustica.mixin;
 
-import com.mojang.renderpearl.backend.api.GpuDeviceBackend;
-import com.mojang.renderpearl.frontend.FrontendGpuDevice;
+import com.mojang.blaze3d.systems.GpuDevice;
+import com.mojang.blaze3d.systems.GpuDeviceBackend;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
 
-@Mixin(FrontendGpuDevice.class)
+@Mixin(GpuDevice.class)
 public interface GpuDeviceAccessor {
 	@Accessor("backend")
 	GpuDeviceBackend caustica$getBackend();

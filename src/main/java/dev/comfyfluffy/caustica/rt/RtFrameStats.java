@@ -65,7 +65,6 @@ public final class RtFrameStats {
                     "frame.recordTlas",
                     "frame.trace",
                     "frame.exposure",
-                    "frame.bloom",
                     "frame.dlssRr",
                     "frame.upscale",
                     "frame.displayMap",

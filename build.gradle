@@ -1,11 +1,9 @@
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
 import dev.comfyfluffy.caustica.build.GenerateShaderRecords
-import dev.comfyfluffy.caustica.build.VerifyMinecraftAbi
-import groovy.json.JsonSlurper
-import java.util.zip.ZipFile
 
 plugins {
-	// No-remap plugin: Minecraft 26.3 is distributed with official (readable) names.
-	id "net.fabricmc.fabric-loom" version "${loom_version}"
+	id "fabric-loom" version "${loom_version}"
 	id "maven-publish"
 }
 
@@ -25,27 +23,33 @@ repositories {
 }
 
 loom {
-	// Client-only mod; keep the complete client JAR, including RenderPearl.
-	clientOnlyMinecraftJar()
 	runs {
 		client {
 			client()
 			setConfigName("Fabric Client")
 			ideConfigGenerated = true
-			runDir "run"
-			// java.lang.foreign restricted methods (FFM bindings to the vendor upscaler DLLs).
+			runDir = "run"
+			// java.lang.foreign restricted methods (FFM bindings to amd_fidelityfx_vk.dll)
 			vmArg "--enable-native-access=ALL-UNNAMED"
-			// NVIDIA NGX (DLSS) allocates ~1MB on the stack during init, which overflows the
-			// default 1MB thread stack.
-			vmArg "-Xss16m"
-			programArgs "--graphicsBackend", "VULKAN"
-			// NixOS fix: Gradle forks drop the dev-shell's LD_LIBRARY_PATH; the driver path is
-			// needed so NGX can dlopen libnvidia-ngx.so.1.
-			if (file("/run/opengl-driver/lib").exists()) {
-				def inherited = System.getenv("LD_LIBRARY_PATH")
-				environmentVariable "LD_LIBRARY_PATH",
-						inherited ? "/run/opengl-driver/lib:${inherited}" : "/run/opengl-driver/lib"
-			}
+
+            // NVIDIA NGX (DLSS) allocates ~1MB on the stack during init, which overflows Java's default 1MB thread stack.
+            // pass -Xss here directly so the main render thread is resized before the VM parses JAVA_TOOL_OPTIONS.
+            vmArg "-Xss16m"
+
+            // NixOS fix: Gradle forks drop the dev-shell's LD_LIBRARY_PATH.
+            // We manually add the driver path so NGX can successfully dlopen libnvidia-ngx.so.1.
+            if (file("/run/opengl-driver/lib").exists()) {
+                def inherited = System.getenv("LD_LIBRARY_PATH")
+                environmentVariable "LD_LIBRARY_PATH",
+                        inherited ? "/run/opengl-driver/lib:${inherited}" : "/run/opengl-driver/lib"
+            }
+		}
+
+		server {
+			server()
+			setConfigName("Fabric Server")
+			ideConfigGenerated = true
+			runDir = "run"
 		}
 	}
 }
@@ -54,12 +58,12 @@ dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
-	testImplementation platform("org.junit:junit-bom:5.14.4")
+	testImplementation platform("org.junit:junit-bom:5.12.2")
 	testImplementation "org.junit.jupiter:junit-jupiter"
 	testRuntimeOnly "org.junit.platform:junit-platform-launcher"
 
 	// Layered TOML config (config/caustica.toml) — NightConfig, the same library NeoForge's
-	// ModConfigSpec is built on. Nested into the JAR as jar-in-jar by Loom's `include`.
+	// ModConfigSpec is built on.
 	include implementation("com.electronwill.night-config:core:3.8.3")
 	include implementation("com.electronwill.night-config:toml:3.8.3")
 }
@@ -242,12 +246,7 @@ def normalizeNgxVendorConfig = { String config ->
 	return normalized
 }
 def ngxVendorConfig = normalizeNgxVendorConfig(
-		findProperty("ngxVendorConfig") ?: findProperty("ngxVendorConfigName") ?: "rel")
-def ngxVendorEnv = providers.environmentVariable("NGX_VENDOR_CONFIG")
-if (ngxVendorEnv.isPresent() && !findProperty("ngxVendorConfig")) {
-	// CI passes the vendor config through the environment; an invalid value must fail loudly.
-	ngxVendorConfig = normalizeNgxVendorConfig(ngxVendorEnv.get())
-}
+		(findProperty("ngxVendorConfig") ?: (isRunClientInvocation ? "dev" : "rel")).toString())
 def ngxNativeRoot = layout.buildDirectory.dir("native/ngx_shim").get().asFile
 def ngxShimOutDir = new File(ngxNativeRoot, ngxShimConfig)
 def currentNgxPlatform = {
@@ -310,9 +309,6 @@ if (requestedNgxPlatformsRaw.size() == 1 && requestedNgxPlatformsRaw[0].equalsIg
 def dlssSdkEnv = providers.environmentVariable("DLSS_SDK")
 def dlssSdkRootProvider = dlssSdkEnv.map { file(it) }
 
-// Opt-in by the same pattern as FSR/NRD/XeSS: a checkout or CI job without the built shim and the
-// vendor runtimes still builds; the DLSS toggles then stay hidden at runtime. The package job
-// asserts the bundled natives explicitly, so a silent omission cannot ship unnoticed.
 def bundleNgxNatives = tasks.register("bundleNgxNatives") {
 	group = "build"
 	description = "Bundles NGX shim and ${ngxVendorConfig} DLSS native libraries into the mod resources."
@@ -336,7 +332,7 @@ def bundleNgxNatives = tasks.register("bundleNgxNatives") {
 		def missing = []
 		def dlssSdkRoot = dlssSdkRootProvider.orNull
 		if (dlssSdkRoot == null) {
-			logger.lifecycle("DLSS_SDK is not set; bundling without DLSS natives.")
+			throw new GradleException("DLSS_SDK environment variable is not set.")
 		}
 		selectedNgxNativePlatforms.each { platform ->
 			def platformShimFiles = fileTree(ngxShimOutDir) {
@@ -346,24 +342,18 @@ def bundleNgxNatives = tasks.register("bundleNgxNatives") {
 				missing += "${platform.name} shim library in ${ngxShimOutDir}"
 			}
 		}
-		if (dlssSdkRoot != null) {
-			selectedNgxNativePlatforms.each { platform ->
-				def platformVendorRoot = platform.vendorRoot(dlssSdkRoot, ngxVendorConfig)
-				def missingVendorIncludes = platform.vendorIncludes.findAll { vendorInclude ->
-					fileTree(platformVendorRoot) {
-						include vendorInclude
-					}.files.empty
-				}
-				if (!missingVendorIncludes.empty) {
-					missing += "${platform.name} vendor libraries ${missingVendorIncludes.join(', ')} in ${platformVendorRoot}"
-				}
+		selectedNgxNativePlatforms.each { platform ->
+			def platformVendorRoot = platform.vendorRoot(dlssSdkRoot, ngxVendorConfig)
+			def missingVendorIncludes = platform.vendorIncludes.findAll { vendorInclude ->
+				fileTree(platformVendorRoot) {
+					include vendorInclude
+				}.files.empty
+			}
+			if (!missingVendorIncludes.empty) {
+				missing += "${platform.name} vendor libraries ${missingVendorIncludes.join(', ')} in ${platformVendorRoot}"
 			}
 		}
 		if (!missing.empty) {
-			if (dlssSdkRoot == null) {
-				logger.warn("Bundling without DLSS natives: missing " + missing.join("; "))
-				return
-			}
 			throw new GradleException("Missing NGX native inputs:\n - " + missing.join("\n - "))
 		}
 
@@ -522,13 +512,11 @@ sourceSets.main.resources.srcDir(files(xessNativeGenRoot).builtBy(bundleXessNati
 
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 25
-	it.options.encoding = "UTF-8"
-	// Keep going past the default 100 diagnostics: the 26.2 → 26.3 port is verified by CI.
-	it.options.compilerArgs += ["-Xmaxerrs", "500"]
 }
 
 java {
-	toolchain.languageVersion = JavaLanguageVersion.of(25)
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
 	withSourcesJar()
 }
 
@@ -538,8 +526,6 @@ tasks.withType(ProcessResources).configureEach {
 
 tasks.withType(AbstractArchiveTask).configureEach {
 	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-	preserveFileTimestamps = false
-	reproducibleFileOrder = true
 }
 
 tasks.named("jar", Jar).configure {
@@ -556,81 +542,3 @@ publishing {
 		}
 	}
 }
-
-// ===== 26.3 integration verification (ported from the previous bootstrap) =====
-// These tasks inspect resolved bytecode and the packaged JAR only; they never load Vulkan or a GPU.
-tasks.register("verifyMinecraftAbi", VerifyMinecraftAbi) {
-	group = "verification"
-	description = "Checks the researched 26.3 integration points against resolved classfiles; does not load Vulkan."
-	minecraftClasspath.from(configurations.compileClasspath)
-	contractFile.set(layout.projectDirectory.file("docs/minecraft-26.3-abi.tsv"))
-	reportFile.set(layout.buildDirectory.file("reports/minecraft-abi.txt"))
-}
-
-// Pass -PexpectBundledNatives=windows-x64,linux-x64 (the package job) to require the vendor natives
-// that only exist after the shim jobs have run. Without it the check stays platform-agnostic.
-def expectedNativePlatforms = (findProperty("expectBundledNatives") ?: "").toString()
-		.split(",").collect { it.trim() }.findAll { !it.isEmpty() }
-
-tasks.register("verifyModJar") {
-	group = "verification"
-	description = "Checks client metadata, mixin registration, packaged shaders and shim bundling."
-	dependsOn tasks.named("jar")
-	inputs.file(tasks.named("jar").flatMap { it.archiveFile })
-	inputs.property("expectBundledNatives", expectedNativePlatforms.join(","))
-	doLast {
-		new ZipFile(tasks.named("jar").get().archiveFile.get().asFile).withCloseable { zip ->
-			def entry = zip.getEntry("fabric.mod.json")
-			if (entry == null) throw new GradleException("Missing fabric.mod.json")
-			def metadata = zip.getInputStream(entry).withCloseable { new JsonSlurper().parse(it) }
-			if (metadata.environment != "client" || metadata.id != "caustica" ||
-					metadata.depends.minecraft != project.minecraft_version ||
-					metadata.version != project.version.toString() || metadata.depends.java != ">=25" ||
-					metadata.depends.fabricloader != ">=${project.loader_version}" ||
-					metadata.entrypoints.main != ["dev.comfyfluffy.caustica.CausticaMod"] ||
-					metadata.entrypoints.client != ["dev.comfyfluffy.caustica.client.CausticaClient"] ||
-					metadata.mixins != ["caustica.mixins.json"]) {
-				throw new GradleException("Unexpected mod metadata: ${metadata}")
-			}
-			if (zip.getEntry("dev/comfyfluffy/caustica/CausticaMod.class") == null ||
-					zip.getEntry("META-INF/LICENSE.md") == null) {
-				throw new GradleException("Missing compiled entrypoint or license")
-			}
-			["world.rgen.spv", "world.rchit.spv", "world.rahit.spv", "world.rmiss.spv",
-			 "world_primary.rgen.spv", "shadow.rmiss.spv", "display.comp.spv", "svgf_reproject.comp.spv",
-			 "exposure_hist.comp.spv", "sdr_present.comp.spv", "hdr_ui_composite.comp.spv",
-			 "overlay_fullscreen_triangle.vert.spv", "block_outline.vert.spv"].each { shader ->
-				if (zip.getEntry("caustica/rt/${shader}") == null) {
-					throw new GradleException("Missing executable shader caustica/rt/${shader}")
-				}
-			}
-			def mixinEntry = zip.getEntry("caustica.mixins.json")
-			if (mixinEntry == null) throw new GradleException("Missing RT integration mixins")
-			def mixins = zip.getInputStream(mixinEntry).withCloseable { new JsonSlurper().parse(it) }
-			def requiredHooks = ["VulkanBackendMixin", "GpuDeviceAccessor", "RenderSystemMixin",
-								 "GameRendererMixin", "LevelRendererMixin", "VulkanGpuSurfaceMixin"]
-			if (!mixins.required || mixins.injectors.defaultRequire != 1 ||
-					!mixins.client.containsAll(requiredHooks)) {
-				throw new GradleException("Required RT hooks are not registered with fail-fast injection checks")
-			}
-			mixins.client.each { name ->
-				def entryName = mixins.package.replace(".", "/") + "/" + name + ".class"
-				if (zip.getEntry(entryName) == null) throw new GradleException("Missing compiled Mixin ${entryName}")
-			}
-			expectedNativePlatforms.each { platform ->
-				def prefix = "caustica/natives/${platform}/"
-				if (!zip.entries().any { it.name.startsWith(prefix) }) {
-					throw new GradleException("Expected bundled natives for ${platform} in ${prefix}")
-				}
-			}
-			def forbidden = zip.entries().findAll {
-				it.name.startsWith("net/minecraft/") || it.name.startsWith("com/mojang/") ||
-						it.name.startsWith("org/lwjgl/")
-			}
-			if (!forbidden.empty) throw new GradleException("Unexpected bundled runtime: ${forbidden*.name}")
-		}
-	}
-}
-
-check { dependsOn tasks.named("verifyMinecraftAbi"), tasks.named("verifyModJar") }
-tasks.named("runClient") { dependsOn tasks.named("verifyMinecraftAbi") }

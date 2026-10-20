@@ -4,7 +4,11 @@ import com.electronwill.nightconfig.core.CommentedConfig;
 import com.electronwill.nightconfig.core.file.CommentedFileConfig;
 import com.electronwill.nightconfig.core.file.FileNotFoundAction;
 import com.electronwill.nightconfig.toml.TomlFormat;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.DoubleUnaryOperator;
@@ -17,8 +21,9 @@ import org.slf4j.LoggerFactory;
 /**
  * Central mutable runtime configuration. Each setting resolves its value, in order of precedence, from a
  * {@code -Dcaustica.*} system property, then the {@code config/caustica.toml} file, then a hardcoded
- * default. The settings UI and any other code call the same {@code set(...)} methods, and {@link #save()}
- * writes the current values back to the TOML file.
+ * default. A missing or empty config is seeded from the bundled factory preset before settings initialize, so
+ * a first launch and every UI "Reset to Defaults" use the same values. The settings UI and any other code
+ * call the same {@code set(...)} methods, and {@link #save()} writes current values back to the TOML file.
  *
  * <p>The system property namespace ({@code caustica.rt.foo}) and the TOML layout are independent: the file
  * uses real nested tables (e.g. {@code [omm]} with a {@code subdivision} key) grouped for readability, while
@@ -27,6 +32,8 @@ import org.slf4j.LoggerFactory;
 public final class CausticaConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger("Caustica");
     private static final List<RuntimeSetting<?>> SETTINGS = new CopyOnWriteArrayList<>();
+    /** Increment when the shipped factory look changes and existing factory-default values need migration. */
+    private static final int CURRENT_CONFIG_VERSION = 1;
 
     private static final Path CONFIG_PATH = resolveConfigPath();
     private static final CommentedFileConfig FILE = loadFile(CONFIG_PATH);
@@ -59,6 +66,17 @@ public final class CausticaConfig {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Composite.SSS,
             Rt.Composite.WEATHER_LIGHTING, Rt.Composite.DENOISER, Rt.Composite.METALLIC_SHININESS,
             Rt.Composite.WATER_WAVE_STRENGTH, Rt.Composite.WATER_WAVE_SPEED, Rt.Composite.WATER_WAVE_DETAIL,
+            Rt.Composite.WETNESS_ENABLED, Rt.Composite.WETNESS_WET_SECONDS, Rt.Composite.WETNESS_DRY_SECONDS,
+            Rt.Composite.WETNESS_GLOSS, Rt.Composite.WETNESS_TRANSITION_DISTANCE,
+            Rt.Composite.GROUND_RAIN_RIPPLES, Rt.Composite.GROUND_RIPPLE_STRENGTH,
+            Rt.Composite.WATER_RAIN_RIPPLES, Rt.Composite.WATER_RIPPLE_SCALE, Rt.Composite.WATER_RIPPLE_STRENGTH,
+            Rt.Composite.RAIN_REFRACTION_ENABLED, Rt.Composite.RAIN_REFRACTION_STRENGTH,
+            Rt.Composite.UNDERWATER_HAZE_ENABLED, Rt.Composite.UNDERWATER_HAZE_STRENGTH,
+            Rt.Composite.UNDERWATER_BLUE_TINT, Rt.Composite.UNDERWATER_SKY_ENABLED,
+            Rt.Composite.UNDERWATER_SKY_DISTANCE, Rt.Composite.RAIN_CLOUD_RESPONSE,
+            Rt.Composite.RAIN_CLOUD_DENSITY, Rt.Composite.LIGHTNING_ENABLED,
+            Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE, Rt.Composite.LIGHTNING_INTENSITY,
+            Rt.Composite.LIGHTNING_SOUND_ENABLED, Rt.Composite.LIGHTNING_SOUND_VOLUME,
             Rt.Composite.PARALLAX_QUALITY,
             Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES,
@@ -71,16 +89,37 @@ public final class CausticaConfig {
             Rt.Reflex.ENABLED, Rt.Lights.HELD_ITEM_LIGHT, Rt.Lights.DYNAMIC_INTENSITY, Rt.Lights.BLOCK_INTENSITY,
             Rt.Lights.RESTIR_SAMPLING, Rt.Lights.RESTIR_TEMPORAL_HISTORY, Rt.Lights.RESTIR_SPATIAL_NEIGHBOURS,
             Rt.Lights.RESTIR_MAX_AGE, Rt.Hand.FOV_FOLLOWS_CAMERA,
-            Rt.Exposure.MODE, Rt.Tonemapping.OPERATOR, Rt.Bloom.ENABLED,
-            Rt.FrameStats.ENABLED, Rt.Hdr.ENABLED, Ngx.PATH,
+            Rt.Exposure.MODE, Rt.Tonemapping.OPERATOR, Rt.FrameStats.ENABLED, Rt.Hdr.ENABLED, Ngx.PATH,
         };
     }
 
-    /** Writes the default config file if it does not exist yet. */
-    public static void saveIfMissing() {
+    /**
+     * Ensures the config is fully populated without overwriting any value already chosen by the player.
+     * A first launch is seeded from the bundled factory preset; this also fills newly-added keys when an
+     * older but non-empty config is kept across an update.
+     */
+    public static synchronized void saveIfMissing() {
         ensureRegistered();
-        if (FILE.valueMap().isEmpty()) {
-            save();
+        boolean changed = FILE.valueMap().isEmpty();
+        int addedKeys = 0;
+        for (RuntimeSetting<?> setting : SETTINGS) {
+            String path = setting.tomlPath();
+            if (path == null || path.isBlank() || FILE.contains(path)) {
+                continue;
+            }
+            Object defaultValue = setting.defaultValue();
+            // Optional values (such as a custom NGX DLL path) intentionally stay absent until set.
+            if (defaultValue == null) {
+                continue;
+            }
+            FILE.set(path, defaultValue);
+            changed = true;
+            addedKeys++;
+        }
+        if (changed) {
+            writeComments();
+            FILE.save();
+            LOGGER.info("Initialized Caustica config at {} ({} missing setting keys added)", CONFIG_PATH, addedKeys);
         }
     }
 
@@ -108,7 +147,10 @@ public final class CausticaConfig {
                         + " path-traced image at full resolution (noisy reference view). Requires dlss-rr.enabled.\n"
                         + " water-wave-strength/-speed/-detail: height multiplier, animation speed and spectrum\n"
                         + " component count for Animated Water. parallax-quality: multiplier on the POM\n"
-                        + " texel-crossing budget (sampling level), independent of parallax-strength (relief depth).");
+                        + " texel-crossing budget (sampling level), independent of parallax-strength (relief depth).\n"
+                        + " wetness-*, ground-rain-ripples and water-ripple-* tune the live rain surface response.\n"
+                        + " rain-refraction-* controls streak lensing; underwater-* controls short-visibility blue haze, light-sourced scattering and sky-miss attenuation;\n"
+                        + " rain-cloud-density limits how much extra coverage storm weather adds.");
         FILE.setComment("materials",
                 " Material appearance controls. metallic-shininess reduces roughness only on authored metallic\n"
                         + " surfaces; 0 preserves resource-pack material data and 1 gives metals their strongest shine.");
@@ -180,12 +222,6 @@ public final class CausticaConfig {
                 " Scene tonemapping after exposure and before writing the vanilla SDR target. operator selects\n"
                         + " the curve; exposure-ev is an extra post-exposure bias; gamma/saturation/contrast\n"
                         + " are final look controls shared by all operators.");
-        FILE.setComment("bloom",
-                " Screen-space multi-scale HDR bloom applied in exposure-referenced linear space before\n"
-                        + " display tone mapping. enabled toggles the pass; quality selects pyramid depth and\n"
-                        + " filter kernel (low, medium, high, ultra); intensity scales overall bloom strength;\n"
-                        + " threshold and soft-knee control highlight extraction; radius controls multi-octave\n"
-                        + " spread; color-influence adjusts the chromaticity of the glow.");
         FILE.setComment("hdr",
                 " HDR display output (ST.2084/PQ). When enabled the swapchain is created in PQ automatically\n"
                         + " (falls back to SDR if the surface doesn't advertise it). paper-white-nits / peak-nits\n"
@@ -201,6 +237,7 @@ public final class CausticaConfig {
     }
 
     private static CommentedFileConfig loadFile(Path path) {
+        seedFactoryConfigIfMissing(path);
         CommentedFileConfig config = CommentedFileConfig.builder(path, TomlFormat.instance())
                 .onFileNotFound(FileNotFoundAction.CREATE_EMPTY)
                 .preserveInsertionOrder()
@@ -208,10 +245,136 @@ public final class CausticaConfig {
                 .build();
         try {
             config.load();
+            boolean changed = false;
+            String oldIntervalPath = "composite.lightning-frequency-seconds";
+            String newRatePath = "composite.lightning-strikes-per-minute";
+            if (!config.contains(newRatePath) && config.contains(oldIntervalPath)) {
+                Number oldInterval = config.get(oldIntervalPath);
+                if (oldInterval != null && oldInterval.doubleValue() > 0.0) {
+                    double rate = Math.clamp(60.0 / oldInterval.doubleValue(), 1.0, 60.0);
+                    config.set(newRatePath, rate);
+                    config.remove(oldIntervalPath);
+                    changed = true;
+                    LOGGER.info("Migrated legacy lightning interval setting to {} strikes per minute", rate);
+                }
+            }
+
+            int versionBeforeMigration = configVersion(config);
+            int updatedDefaults = migrateLegacyFactoryDefaults(config);
+            if (versionBeforeMigration < CURRENT_CONFIG_VERSION) {
+                changed = true;
+                LOGGER.info("Migrated Caustica config from version {} to {} ({} factory-default values updated)",
+                        versionBeforeMigration, CURRENT_CONFIG_VERSION, updatedDefaults);
+            }
+            if (changed) {
+                config.save();
+            }
         } catch (Exception e) {
-            LOGGER.warn("Failed to read Caustica config {}: {}", path, e.toString());
+            LOGGER.warn("Failed to read or migrate Caustica config {}: {}", path, e.toString());
         }
         return config;
+    }
+
+    private static int configVersion(CommentedConfig config) {
+        Object rawVersion = config.contains("config-version") ? config.get("config-version") : null;
+        return rawVersion instanceof Number version ? Math.max(0, version.intValue()) : 0;
+    }
+
+    /**
+     * Migrates only values that still equal the previous built-in defaults. Values that differ are
+     * treated as player choices and are preserved. This fixes old default configs that would otherwise
+     * continue overriding the improved bundled preset forever simply because the TOML file exists.
+     *
+     * <p>Called while loading the file, before RuntimeSetting instances read it, so both the file and
+     * live settings start with the migrated values. Future migrations should increment
+     * {@link #CURRENT_CONFIG_VERSION} and add their previous-default mappings here.
+     *
+     * @return the number of existing values changed to the current factory preset
+     */
+    static int migrateLegacyFactoryDefaults(CommentedConfig config) {
+        int version = configVersion(config);
+        if (version >= CURRENT_CONFIG_VERSION) {
+            return 0;
+        }
+
+        int migrated = 0;
+        migrated += replaceLegacyDefault(config, "worker-threads", legacyDefaultWorkerThreads(), 4);
+        migrated += replaceLegacyDefault(config, "composite.max-bounces", 4, 8);
+        migrated += replaceLegacyDefault(config, "composite.rain-refraction-strength", 1.0, 2.0);
+        migrated += replaceLegacyDefault(config, "composite.underwater-haze-strength", 1.0, 0.1);
+        migrated += replaceLegacyDefault(config, "composite.underwater-blue-tint", 0.98, 0.5);
+        migrated += replaceLegacyDefault(config, "composite.underwater-sky-distance", 72.0, 128.0);
+        migrated += replaceLegacyDefault(config, "composite.rain-cloud-density", 0.14, 0.5);
+        migrated += replaceLegacyDefault(config, "composite.lightning-strikes-per-minute", 8.0, 2.0);
+        migrated += replaceLegacyDefault(config, "materials.metallic-shininess", 0.0, 1.0);
+        migrated += replaceLegacyDefault(config, "composite.parallax-strength", 1.0, 1.25);
+        migrated += replaceLegacyDefault(config, "composite.cloud-style", "classic", "volumetric");
+        migrated += replaceLegacyDefault(config, "composite.cloud-thickness", 0.5, 0.15);
+        migrated += replaceLegacyDefault(config, "composite.cloud-shadow-strength", 0.75, 1.0);
+        migrated += replaceLegacyDefault(config, "composite.cloud-opacity", 0.9, 0.5);
+        migrated += replaceLegacyDefault(config, "composite.cloud-height", 320.0, 192.0);
+        migrated += replaceLegacyDefault(config, "composite.cloud-coverage", 0.55, 0.4);
+        migrated += replaceLegacyDefault(config, "composite.fog", false, true);
+        migrated += replaceLegacyDefault(config, "particles.rain-density", 1.0, 0.6);
+        migrated += replaceLegacyDefault(config, "dlss-rr.preset", 0, 6);
+        migrated += replaceLegacyDefault(config, "sharc.enabled", false, true);
+        migrated += replaceLegacyDefault(config, "tonemap.operator", "agx", "psychov");
+        migrated += replaceLegacyDefault(config, "tonemap.exposure-ev", 0.0, 0.5);
+        migrated += replaceLegacyDefault(config, "tonemap.gamma", 1.0, 1.5);
+        migrated += replaceLegacyDefault(config, "tonemap.saturation", 1.0, 1.05);
+
+        config.set("config-version", CURRENT_CONFIG_VERSION);
+        return migrated;
+    }
+
+    private static int replaceLegacyDefault(CommentedConfig config, String path, Object legacy, Object current) {
+        if (!config.contains(path)) {
+            return 0;
+        }
+        Object actual = config.get(path);
+        boolean matches;
+        if (actual instanceof Number actualNumber && legacy instanceof Number legacyNumber) {
+            matches = Math.abs(actualNumber.doubleValue() - legacyNumber.doubleValue()) <= 1.0e-6;
+        } else {
+            matches = java.util.Objects.equals(actual, legacy);
+        }
+        if (!matches) {
+            return 0;
+        }
+        config.set(path, current);
+        return 1;
+    }
+
+    private static int legacyDefaultWorkerThreads() {
+        return Math.clamp(Runtime.getRuntime().availableProcessors() / 2, 1, 4);
+    }
+
+    /**
+     * Creates the user's config from the bundled factory preset on first launch. A non-empty existing
+     * config is never replaced, so installing an update cannot overwrite a player's custom settings.
+     * The preset is intentionally shared with the hardcoded RuntimeSetting defaults so startup and
+     * every UI "Reset to Defaults" action agree.
+     */
+    private static void seedFactoryConfigIfMissing(Path path) {
+        try {
+            if (Files.isRegularFile(path) && Files.size(path) > 0L) {
+                return;
+            }
+            try (InputStream defaults = CausticaConfig.class.getResourceAsStream("/caustica-defaults.toml")) {
+                if (defaults == null) {
+                    LOGGER.warn("Bundled Caustica defaults were not found; using code defaults for {}", path);
+                    return;
+                }
+                Path parent = path.toAbsolutePath().getParent();
+                if (parent != null) {
+                    Files.createDirectories(parent);
+                }
+                Files.copy(defaults, path, StandardCopyOption.REPLACE_EXISTING);
+                LOGGER.info("Installed Caustica factory config defaults at {}", path);
+            }
+        } catch (IOException e) {
+            LOGGER.warn("Could not seed Caustica factory config at {}; using code defaults: {}", path, e.toString());
+        }
     }
 
     private static Boolean fileBoolean(String tomlPath) {
@@ -644,7 +807,7 @@ public final class CausticaConfig {
     public static final class Rt {
         public static final BooleanSetting ENABLED = bool("caustica.rt", "enabled", true);
         public static final IntSetting WORKER_THREADS =
-                intAtLeast("caustica.rt.workerThreads", "worker-threads", defaultWorkerThreads(), 1);
+                intAtLeast("caustica.rt.workerThreads", "worker-threads", 4, 1);
 
         private Rt() {
         }
@@ -653,7 +816,7 @@ public final class CausticaConfig {
             public static final IntSetting DEBUG_VIEW = intValue("caustica.rt.debugView", "composite.debug-view", 0);
             public static final IntSetting SPP = intAtLeast("caustica.rt.spp", "composite.spp", 1, 1);
             public static final IntSetting MAX_BOUNCES =
-                    clampedInt("caustica.rt.maxBounces", "composite.max-bounces", 4, 2, 8);
+                    clampedInt("caustica.rt.maxBounces", "composite.max-bounces", 8, 2, 8);
             public static final BooleanSetting WATER_WAVES =
                     bool("caustica.rt.waterWaves", "composite.water-waves", true);
             /**
@@ -691,6 +854,61 @@ public final class CausticaConfig {
              */
             public static final IntSetting WATER_WAVE_DETAIL =
                     clampedInt("caustica.rt.waterWaveDetail", "composite.water-wave-detail", 7, 1, 7);
+
+            // Dynamic rain/water options. These are shader-facing runtime values and are read every frame.
+            public static final BooleanSetting WETNESS_ENABLED =
+                    bool("caustica.rt.wetnessEnabled", "composite.wetness-enabled", true);
+            public static final FloatSetting WETNESS_WET_SECONDS =
+                    clampedFloat("caustica.rt.wetnessWetSeconds", "composite.wetness-wet-seconds", 5.0f, 1.0f, 30.0f);
+            public static final FloatSetting WETNESS_DRY_SECONDS =
+                    clampedFloat("caustica.rt.wetnessDrySeconds", "composite.wetness-dry-seconds", 30.0f, 5.0f, 120.0f);
+            public static final FloatSetting WETNESS_GLOSS =
+                    clampedFloat("caustica.rt.wetnessGloss", "composite.wetness-gloss", 1.0f, 0.0f, 1.0f);
+            /** Horizontal spread, in blocks, for rain wetness and ground ripples to fade under shelter. */
+            public static final FloatSetting WETNESS_TRANSITION_DISTANCE =
+                    clampedFloat("caustica.rt.wetnessTransitionDistance", "composite.wetness-transition-distance",
+                            6.0f, 0.0f, 12.0f);
+            public static final BooleanSetting GROUND_RAIN_RIPPLES =
+                    bool("caustica.rt.groundRainRipples", "composite.ground-rain-ripples", true);
+            public static final FloatSetting GROUND_RIPPLE_STRENGTH =
+                    clampedFloat("caustica.rt.groundRippleStrength", "composite.ground-ripple-strength", 1.0f, 0.0f, 2.0f);
+            public static final BooleanSetting WATER_RAIN_RIPPLES =
+                    bool("caustica.rt.waterRainRipples", "composite.water-rain-ripples", true);
+            public static final FloatSetting WATER_RIPPLE_SCALE =
+                    clampedFloat("caustica.rt.waterRippleScale", "composite.water-ripple-scale", 0.65f, 0.25f, 2.0f);
+            public static final FloatSetting WATER_RIPPLE_STRENGTH =
+                    clampedFloat("caustica.rt.waterRippleStrength", "composite.water-ripple-strength", 1.0f, 0.0f, 2.0f);
+            public static final BooleanSetting RAIN_REFRACTION_ENABLED =
+                    bool("caustica.rt.rainRefractionEnabled", "composite.rain-refraction-enabled", true);
+            public static final FloatSetting RAIN_REFRACTION_STRENGTH =
+                    clampedFloat("caustica.rt.rainRefractionStrength", "composite.rain-refraction-strength", 2.0f, 0.0f, 2.0f);
+            public static final BooleanSetting UNDERWATER_HAZE_ENABLED =
+                    bool("caustica.rt.underwaterHazeEnabled", "composite.underwater-haze-enabled", true);
+            public static final FloatSetting UNDERWATER_HAZE_STRENGTH =
+                    clampedFloat("caustica.rt.underwaterHazeStrength", "composite.underwater-haze-strength", 0.1f, 0.0f, 2.0f);
+            public static final FloatSetting UNDERWATER_BLUE_TINT =
+                    clampedFloat("caustica.rt.underwaterBlueTint", "composite.underwater-blue-tint", 0.5f, 0.0f, 1.0f);
+            public static final BooleanSetting UNDERWATER_SKY_ENABLED =
+                    bool("caustica.rt.underwaterSkyEnabled", "composite.underwater-sky-enabled", true);
+            public static final FloatSetting UNDERWATER_SKY_DISTANCE =
+                    clampedFloat("caustica.rt.underwaterSkyDistance", "composite.underwater-sky-distance", 128.0f, 8.0f, 128.0f);
+            public static final BooleanSetting RAIN_CLOUD_RESPONSE =
+                    bool("caustica.rt.rainCloudResponse", "composite.rain-cloud-response", true);
+            public static final FloatSetting RAIN_CLOUD_DENSITY =
+                    clampedFloat("caustica.rt.rainCloudDensity", "composite.rain-cloud-density", 0.5f, 0.0f, 1.0f);
+            /** Random custom lightning during precipitation. Rate is the expected average count per minute. */
+            public static final BooleanSetting LIGHTNING_ENABLED =
+                    bool("caustica.rt.lightningEnabled", "composite.lightning-enabled", true);
+            public static final FloatSetting LIGHTNING_STRIKES_PER_MINUTE =
+                    clampedFloat("caustica.rt.lightningStrikesPerMinute", "composite.lightning-strikes-per-minute", 2.0f, 1.0f, 60.0f);
+            public static final FloatSetting LIGHTNING_INTENSITY =
+                    clampedFloat("caustica.rt.lightningIntensity", "composite.lightning-intensity", 1.5f, 0.0f, 5.0f);
+            /** Play positional thunder for each procedural lightning strike. */
+            public static final BooleanSetting LIGHTNING_SOUND_ENABLED =
+                    bool("caustica.rt.lightningSoundEnabled", "composite.lightning-sound-enabled", true);
+            /** Multiplier for the delayed, positional thunder sound. Zero mutes only this added sound. */
+            public static final FloatSetting LIGHTNING_SOUND_VOLUME =
+                    clampedFloat("caustica.rt.lightningSoundVolume", "composite.lightning-sound-volume", 1.0f, 0.0f, 2.0f);
             /**
              * Extra polish applied only to surfaces authored as metallic. 0 preserves the resource
              * pack's LabPBR roughness; 1 reduces metallic roughness to 15% of its authored value.
@@ -698,7 +916,7 @@ public final class CausticaConfig {
              * without brightening non-metal materials or light sources.
              */
             public static final FloatSetting METALLIC_SHININESS =
-                    clampedFloat("caustica.rt.metallicShininess", "materials.metallic-shininess", 0.0f, 0.0f, 1.0f);
+                    clampedFloat("caustica.rt.metallicShininess", "materials.metallic-shininess", 1.0f, 0.0f, 1.0f);
             /**
              * Shader-only Parallax Occlusion Mapping from the LabPBR {@code _n} alpha height channel.
              * The closest-hit shader marches a short ray through the height field and shades the
@@ -708,9 +926,9 @@ public final class CausticaConfig {
              */
             public static final BooleanSetting PARALLAX_ENABLED =
                     bool("caustica.rt.parallax", "composite.parallax", true);
-            /** Virtual relief depth multiplier (1.0 = 1/8 block of relief). */
+            /** Virtual relief depth multiplier (1.0 = 1/8 block of relief; the shipped preset uses 1.25). */
             public static final FloatSetting PARALLAX_STRENGTH =
-                    clampedFloat("caustica.rt.parallaxStrength", "composite.parallax-strength", 1.0f, 0.0f, 4.0f);
+                    clampedFloat("caustica.rt.parallaxStrength", "composite.parallax-strength", 1.25f, 0.0f, 4.0f);
             /** Bilinear (smooth) vs pixel-aligned LabPBR height/normal sampling. */
             public static final BooleanSetting PARALLAX_SMOOTHING =
                     bool("caustica.rt.parallaxSmoothing", "composite.parallax-smoothing", true);
@@ -786,109 +1004,18 @@ public final class CausticaConfig {
              * the cloud shadows stay identical between them.
              */
             public static final StringSetting CLOUD_STYLE =
-                    string("caustica.rt.cloudStyle", "composite.cloud-style", "classic",
+                    string("caustica.rt.cloudStyle", "composite.cloud-style", "volumetric",
                             Composite::sanitizeCloudStyle);
             /**
-             * Classic cloud thickness, 0..1, as a fraction of {@code RtComposite}'s declared maximum.
+             * Cloud thickness, 0..1, as a fraction of {@link #CLOUD_MAX_THICKNESS_BLOCKS}.
              *
-             * <p>This is the CLASSIC deck's box height: the slider scales the height of vanilla's
-             * authored cell boxes, floored at vanilla's own 4-block extrusion, so classic clouds are
-             * always real boxes with lit tops and shaded sides. It also sets the flat-sheet deck's depth
-             * when the classic style is drawn flat.
-             *
-             * <p>The volumetric style no longer reads this value: its formations are generated and their
-             * thickness is exactly what {@link #CLOUD_MIN_THICKNESS} and {@link #CLOUD_MAX_THICKNESS}
-             * say, in blocks. The clouds screen hides this row in volumetric mode for that reason.
+             * <p>Volumetric: 0 is a flat sheet (the deck collapses to a plane and takes the cheap
+             * non-marched path); 1 is a deep bank. Classic: the slider scales the HEIGHT of vanilla's
+             * authored cell boxes, floored at vanilla's own 4-block extrusion — classic clouds are
+             * always real boxes with lit tops and shaded sides, never thinner than the game draws them.
              */
             public static final FloatSetting CLOUD_THICKNESS =
-                    clampedFloat("caustica.rt.cloudThickness", "composite.cloud-thickness", 0.5f, 0.0f, 1.0f);
-            /** Lower bound of the two cloud-thickness sliders, in blocks (the UI's own range too). */
-            public static final int CLOUD_MIN_THICKNESS_BLOCKS = 16;
-            /** Upper bound of the two cloud-thickness sliders, in blocks. */
-            public static final int CLOUD_MAX_THICKNESS_BLOCKS = 22;
-            /** Default for {@link #CLOUD_MIN_THICKNESS}; the ordered pair shares one default range. */
-            private static final int CLOUD_MIN_THICKNESS_DEFAULT = 16;
-            /** Default for {@link #CLOUD_MAX_THICKNESS}. */
-            private static final int CLOUD_MAX_THICKNESS_DEFAULT = 22;
-
-            /**
-             * Thinnest volumetric cloud formation, in blocks (16..22).
-             *
-             * <p>Every generated cloud is assigned its own vertical extent, sampled between this and
-             * {@link #CLOUD_MAX_THICKNESS} by a low-frequency field. The value is used as an actual
-             * geometric extent — it sets how far a formation's density spans above its own base, which
-             * is what the ray march integrates and what the light march shadows through — not as a
-             * density or opacity multiplier.
-             *
-             * <p>The pair is kept ordered: see {@link #setCloudMinThickness(int)}.
-             */
-            public static final IntSetting CLOUD_MIN_THICKNESS =
-                    clampedInt("caustica.rt.cloudMinThickness", "composite.cloud-min-thickness",
-                            CLOUD_MIN_THICKNESS_DEFAULT, CLOUD_MIN_THICKNESS_BLOCKS,
-                            CLOUD_MAX_THICKNESS_BLOCKS);
-            /**
-             * Thickest volumetric cloud formation, in blocks (16..22).
-             *
-             * <p>Equivalent to the minimum at the other end of the same assignment: with both sliders
-             * equal every formation is generated at exactly that thickness, and with a range the deck
-             * contains a natural mixture of shallow puffs and deeper masses. See
-             * {@link #setCloudMaxThickness(int)} for the ordering rule.
-             */
-            public static final IntSetting CLOUD_MAX_THICKNESS =
-                    clampedInt("caustica.rt.cloudMaxThickness", "composite.cloud-max-thickness",
-                            CLOUD_MAX_THICKNESS_DEFAULT, CLOUD_MIN_THICKNESS_BLOCKS,
-                            CLOUD_MAX_THICKNESS_BLOCKS);
-            /**
-             * Set the minimum formation thickness, keeping the pair ordered.
-             *
-             * <p>If the requested minimum is above the current maximum, the maximum is raised to match
-             * rather than the request being clamped: the value the player is dragging is the one they
-             * asked for, and the renderer then uses a genuinely consistent interval. The ordering rule
-             * is what makes "min &lt;= max" an invariant of the stored state rather than a check every
-             * shader has to repeat.
-             */
-            public static void setCloudMinThickness(int blocks) {
-                int min = Math.clamp(blocks, CLOUD_MIN_THICKNESS_BLOCKS, CLOUD_MAX_THICKNESS_BLOCKS);
-                CLOUD_MIN_THICKNESS.set(min);
-                if (CLOUD_MAX_THICKNESS.value() < min) {
-                    CLOUD_MAX_THICKNESS.set(min);
-                }
-            }
-
-            /** Set the maximum formation thickness, lowering the minimum if the interval would invert. */
-            public static void setCloudMaxThickness(int blocks) {
-                int max = Math.clamp(blocks, CLOUD_MIN_THICKNESS_BLOCKS, CLOUD_MAX_THICKNESS_BLOCKS);
-                CLOUD_MAX_THICKNESS.set(max);
-                if (CLOUD_MIN_THICKNESS.value() > max) {
-                    CLOUD_MIN_THICKNESS.set(max);
-                }
-            }
-
-            /**
-             * Repair an out-of-order pair that arrived from outside the sliders (a hand-edited
-             * {@code caustica.toml}, a system property, a reset order). Runs once per frame from
-             * {@code RtComposite.cloudState}; a no-op in the normal case.
-             */
-            public static void reconcileCloudThickness() {
-                int min = CLOUD_MIN_THICKNESS.value();
-                int max = CLOUD_MAX_THICKNESS.value();
-                if (min > max) {
-                    CLOUD_MIN_THICKNESS.set(max);
-                }
-            }
-
-            /** This frame's minimum formation thickness in blocks, after reconciliation. */
-            public static int cloudMinThicknessBlocks() {
-                reconcileCloudThickness();
-                return CLOUD_MIN_THICKNESS.value();
-            }
-
-            /** This frame's maximum formation thickness in blocks, after reconciliation. */
-            public static int cloudMaxThicknessBlocks() {
-                reconcileCloudThickness();
-                return CLOUD_MAX_THICKNESS.value();
-            }
-
+                    clampedFloat("caustica.rt.cloudThickness", "composite.cloud-thickness", 0.15f, 0.0f, 1.0f);
             /**
              * How much the cloud deck darkens the sun/moon light reaching the ground beneath it.
              *
@@ -899,30 +1026,30 @@ public final class CausticaConfig {
              */
             public static final FloatSetting CLOUD_SHADOW_STRENGTH =
                     clampedFloat("caustica.rt.cloudShadowStrength", "composite.cloud-shadow-strength",
-                            0.75f, 0.0f, 1.0f);
+                            1.0f, 0.0f, 1.0f);
             /**
              * Opacity of the cloud deck. 0 is invisible (and skips the whole cloud path), 1 fully hides
              * the sky behind a cloud. Values in between let the sky, sun and stars show through.
              */
             public static final FloatSetting CLOUD_OPACITY =
-                    clampedFloat("caustica.rt.cloudOpacity", "composite.cloud-opacity", 0.9f, 0.0f, 1.0f);
+                    clampedFloat("caustica.rt.cloudOpacity", "composite.cloud-opacity", 0.5f, 0.0f, 1.0f);
             /**
-             * World Y the BASE of the cloud deck sits at. Vanilla's clouds sit at 192; the default is
-             * higher because Caustica's clouds have real thickness and a deck whose base is at vanilla
-             * height reads as much closer to the ground than vanilla's flat sheet does.
+             * World Y the BASE of the cloud deck sits at. The shipped factory preset uses vanilla's
+             * 192-block cloud base; raise it when the thicker volumetric deck should sit farther away.
              *
              * <p>Exposed as a slider: with volumetric clouds the deck's distance is a strong part of the
              * look, and the right value depends on the world's terrain height and the player's taste.
              * The range comfortably spans from just above build height to far overhead.
              */
             public static final FloatSetting CLOUD_HEIGHT =
-                    clampedFloat("caustica.rt.cloudHeight", "composite.cloud-height", 320.0f, 128.0f, 1024.0f);
+                    clampedFloat("caustica.rt.cloudHeight", "composite.cloud-height", 192.0f, 128.0f, 1024.0f);
             /**
-             * Fraction of the sky the deck covers in clear weather. Rain drives this toward fully
-             * overcast on top of whatever is set here (see {@code RtComposite.cloudState}).
+             * Fraction of the sky the deck covers in clear weather. Rain adds weather-driven coverage
+             * and softens the deck opacity, capped by {@link #RAIN_CLOUD_DENSITY} so default storms
+             * retain sky gaps instead of forcing a uniform overcast wall.
              */
             public static final FloatSetting CLOUD_COVERAGE =
-                    clampedFloat("caustica.rt.cloudCoverage", "composite.cloud-coverage", 0.55f, 0.0f, 1.0f);
+                    clampedFloat("caustica.rt.cloudCoverage", "composite.cloud-coverage", 0.4f, 0.0f, 1.0f);
             /**
              * Ray-traced volumetric fog: participating air whose light cones, sun shafts and valley
              * mist are integrated per path segment (see {@code shaders/world/fog.slang}).
@@ -938,7 +1065,7 @@ public final class CausticaConfig {
              * density lane, which the toggle zeroes).
              */
             public static final BooleanSetting FOG_ENABLED =
-                    bool("caustica.rt.fog", "composite.fog", false);
+                    bool("caustica.rt.fog", "composite.fog", true);
             /**
              * Scattering density as a fraction of {@code fog.slang}'s FOG_SIGMA_MAX. 0% is no fog at
              * all (and skips the whole path), 100% is thick haze — at the default slider range a
@@ -1142,8 +1269,8 @@ public final class CausticaConfig {
              * ground clipping and fall animation all come from the render state the game already
              * extracts each frame — replayed as real geometry in the acceleration structure.
              *
-             * <p>Shares the particle budget ({@code particles.max-particles}) and requires
-             * {@code particles.enabled}, since weather rides the same mesh/BLAS as particle billboards.
+             * <p>Uses a reserved weather-column budget independent of ordinary particle billboards, so
+             * precipitation remains visible even when generic ray-traced particles are disabled.
              */
             public static final BooleanSetting WEATHER_ENABLED =
                     bool("caustica.rt.weatherParticles", "particles.weather-enabled", true);
@@ -1156,7 +1283,7 @@ public final class CausticaConfig {
              * light attenuation still follow the weather itself, which is a separate toggle).
              */
             public static final FloatSetting RAIN_DENSITY =
-                    clampedFloat("caustica.rt.rainDensity", "particles.rain-density", 1.0f, 0.0f, 1.0f);
+                    clampedFloat("caustica.rt.rainDensity", "particles.rain-density", 0.6f, 0.0f, 1.0f);
             public static final BooleanSetting GLOW_ENABLED =
                     bool("caustica.rt.glow", "entities.glow.enabled", true);
             public static final BooleanSetting NAME_TAGS_ENABLED =
@@ -1214,24 +1341,7 @@ public final class CausticaConfig {
 
         public static final class DlssRr {
             public static final BooleanSetting ENABLED = bool("caustica.rt.dlssRr", "dlss-rr.enabled", true);
-
-            /**
-             * The NVSDK_NGX_RayReconstruction_Hint_Render_Preset values the model-preset slider steps
-             * through, in slider order: 0 = let the DLL pick its per-mode default, 4 = preset D (the
-             * first transformer model), 5 = preset E (the latest first-generation transformer, required
-             * when a depth-of-field guide is fed), 6 = preset F (the second-generation transformer,
-             * DLSS 4.5 Ray Reconstruction).
-             *
-             * <p>This is Ray Reconstruction's own enum, unrelated to Super Resolution's letters. A/B/C
-             * are absent because NVIDIA removed them ("removed, use preset D or E") and every letter
-             * past F is documented as "do not use, reverts to default behavior", so offering them
-             * would only produce a UI that promises a model the DLL is not running.
-             */
-            public static final List<Integer> PRESET_VALUES = List.of(0, 4, 5, 6);
-
-            /** One of {@link #PRESET_VALUES}; anything else (stale config, preset A) snaps to default. */
-            public static final IntSetting PRESET = new IntSetting("caustica.rt.dlssRr.preset", "dlss-rr.preset", 0,
-                    v -> PRESET_VALUES.contains(v) ? v : 0);
+            public static final IntSetting PRESET = intValue("caustica.rt.dlssRr.preset", "dlss-rr.preset", 6);
             public static final IntSetting QUALITY = intValue("caustica.rt.dlssRr.quality", "dlss-rr.quality", 0);
 
             private DlssRr() {
@@ -1349,12 +1459,12 @@ public final class CausticaConfig {
          * {@code L += throughput * cached}, exactly the RTXGI SDK sample's usage. The result is
          * shorter path tails, much less multi-bounce noise and a performance win once the cache is
          * warm. It is deliberately experimental — it is a Caustica-native Slang implementation of
-         * the algorithm rather than NVIDIA's shader headers — so it is off by default and every
-         * tuning knob is exposed in the SHaRC settings sub-screen (plus debug view 13, which paints
+         * the algorithm rather than NVIDIA's shader headers — so the shipped factory preset enables it,
+         * and every tuning knob is exposed in the SHaRC settings sub-screen (plus debug view 13, which paints
          * per-pixel cache query results).
          */
         public static final class Sharc {
-            public static final BooleanSetting ENABLED = bool("caustica.rt.sharc", "sharc.enabled", false);
+            public static final BooleanSetting ENABLED = bool("caustica.rt.sharc", "sharc.enabled", true);
             /**
              * Voxel edge length in blocks. Smaller cells are sharper but need more entries and warm
              * more slowly; larger cells blur light across larger regions. Minecraft blocks are a
@@ -1368,7 +1478,7 @@ public final class CausticaConfig {
              * 256K (12 MiB) is a sane default here, and 1M (48 MiB) is available for big scenes.
              */
             public static final IntSetting CACHE_ENTRIES =
-                    clampedInt("caustica.rt.sharc.cacheEntries", "sharc.cache-entries", 1 << 18,
+                    clampedInt("caustica.rt.sharc.cacheEntries", "sharc.cache-entries", 262144,
                             2048, 1 << 20);
             /** Fraction of shaded paths that actually write a cache entry. */
             public static final FloatSetting UPDATE_COVERAGE =
@@ -1492,14 +1602,14 @@ public final class CausticaConfig {
         /** Tonemap curve and final look controls for the SDR display mapper. */
         public static final class Tonemapping {
             public static final StringSetting OPERATOR =
-                    string("caustica.rt.tonemap.operator", "tonemap.operator", "agx", Tonemapping::sanitizeOperator);
+                    string("caustica.rt.tonemap.operator", "tonemap.operator", "psychov", Tonemapping::sanitizeOperator);
             /** Extra exposure bias applied after the auto/manual exposure image, in EV stops. */
             public static final FloatSetting EXPOSURE_EV =
-                    clampedFloat("caustica.rt.tonemap.exposureEv", "tonemap.exposure-ev", 0.0f, -5.0f, 5.0f);
+                    clampedFloat("caustica.rt.tonemap.exposureEv", "tonemap.exposure-ev", 0.5f, -5.0f, 5.0f);
             public static final FloatSetting GAMMA =
-                    clampedFloat("caustica.rt.tonemap.gamma", "tonemap.gamma", 1.0f, 0.5f, 3.0f);
+                    clampedFloat("caustica.rt.tonemap.gamma", "tonemap.gamma", 1.5f, 0.5f, 3.0f);
             public static final FloatSetting SATURATION =
-                    clampedFloat("caustica.rt.tonemap.saturation", "tonemap.saturation", 1.0f, 0.0f, 3.0f);
+                    clampedFloat("caustica.rt.tonemap.saturation", "tonemap.saturation", 1.05f, 0.0f, 3.0f);
             public static final FloatSetting CONTRAST =
                     clampedFloat("caustica.rt.tonemap.contrast", "tonemap.contrast", 1.0f, 0.0f, 3.0f);
 
@@ -1529,62 +1639,6 @@ public final class CausticaConfig {
                     case "linear", "passthrough", "pass_through", "none" -> "linear";
                     case "psychov", "psycho_v", "psychovisual", "psycho" -> "psychov";
                     default -> "agx";
-                };
-            }
-        }
-
-        /**
-         * Screen-space multi-scale HDR bloom. Runs at display resolution between {@code RtExposure}
-         * and {@code RtDisplayPipeline}, evaluating highlight extraction in exposure-referenced
-         * linear HDR space and compositing back into the linear HDR buffer before SDR/HDR tone mapping.
-         */
-        public static final class Bloom {
-            public static final BooleanSetting ENABLED =
-                    bool("caustica.rt.bloom", "bloom.enabled", true);
-            public static final StringSetting QUALITY =
-                    string("caustica.rt.bloom.quality", "bloom.quality", "high", Bloom::sanitizeQuality);
-            public static final FloatSetting INTENSITY =
-                    clampedFloat("caustica.rt.bloom.intensity", "bloom.intensity", 0.15f, 0.0f, 1.0f);
-            public static final FloatSetting THRESHOLD =
-                    clampedFloat("caustica.rt.bloom.threshold", "bloom.threshold", 1.0f, 0.0f, 10.0f);
-            public static final FloatSetting SOFT_KNEE =
-                    clampedFloat("caustica.rt.bloom.softKnee", "bloom.soft-knee", 0.5f, 0.0f, 1.0f);
-            public static final FloatSetting RADIUS =
-                    clampedFloat("caustica.rt.bloom.radius", "bloom.radius", 0.65f, 0.0f, 1.0f);
-            public static final FloatSetting COLOR_INFLUENCE =
-                    clampedFloat("caustica.rt.bloom.colorInfluence", "bloom.color-influence", 1.0f, 0.0f, 2.0f);
-
-            private Bloom() {
-            }
-
-            public static int qualityIndex() {
-                return switch (QUALITY.get()) {
-                    case "low" -> 0;
-                    case "medium" -> 1;
-                    case "ultra" -> 3;
-                    default -> 2; // high
-                };
-            }
-
-            public static int mipCountForQuality(int qualityIndex) {
-                return switch (qualityIndex) {
-                    case 0 -> 3;
-                    case 1 -> 4;
-                    case 3 -> 6;
-                    default -> 5;
-                };
-            }
-
-            private static String sanitizeQuality(String value) {
-                if (value == null) {
-                    return "high";
-                }
-                return switch (value.trim().toLowerCase(java.util.Locale.ROOT).replace('-', '_')) {
-                    case "low", "0" -> "low";
-                    case "medium", "med", "1" -> "medium";
-                    case "high", "2" -> "high";
-                    case "ultra", "3" -> "ultra";
-                    default -> "high";
                 };
             }
         }
@@ -1709,7 +1763,4 @@ public final class CausticaConfig {
         return new FloatSetting(key, tomlPath, fallbackDegrees, Math::toRadians, Math::toDegrees, v -> Double.isFinite(v) ? v : 0.0);
     }
 
-    private static int defaultWorkerThreads() {
-        return Math.clamp(Runtime.getRuntime().availableProcessors() / 2, 1, 4);
-    }
 }
