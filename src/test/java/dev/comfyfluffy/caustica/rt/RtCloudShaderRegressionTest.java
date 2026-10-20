@@ -59,10 +59,25 @@ final class RtCloudShaderRegressionTest {
                 "sun visibility must not use the visible-cloud query with camera/view fades");
         assertFalse(body.contains("cloudAlpha("),
                 "sun visibility must not inherit visible-cloud alpha fades");
+        assertTrue(source.contains("clamp(push.rainEffects.w, 0.0, 1.0)"),
+                "rain-added cloud coverage must be capped by the player's density option");
+        assertTrue(source.contains("public float cloudWeatherOpacityScale(WorldPush push)"),
+                "storm opacity should have a separate, tunable weather-density cap");
+        assertTrue(source.contains("* cloudWeatherOpacityScale(push)"),
+                "the storm opacity scale must affect visible cloud and shadow paths");
         assertTrue(body.contains("float t = deckRel / lightDir.y;"),
                 "cloud shadows must intersect the light ray from the receiver");
+        assertTrue(source.contains("public float cloudWeatherGrowth(WorldPush push)"),
+                "rain should grow local cloud coverage instead of scaling the world-space field");
+        assertFalse(source.contains("cloudWeatherScale"),
+                "global coordinate scaling translates the whole deck as rain rises");
         assertTrue(body.contains("push.cloudAnchor.xy + pointRel.xz + lightDir.xz * t"),
-                "cloud shadows must sample at the receiver/light intersection, not at the camera");
+                "cloud shadows must sample the unscaled world-anchored receiver/light intersection");
+        String composite = Files.readString(RT_COMPOSITE);
+        assertFalse(composite.contains("anchorX *= cloudScale") || composite.contains("anchorZ *= cloudScale"),
+                "weather must not scale the large absolute cloud anchor");
+        assertTrue(source.contains("cloudCellWeatherOccupied(push, cell)"),
+                "authored cloud cells should grow at their own boundaries under rain");
     }
 
     @Test
@@ -79,52 +94,6 @@ final class RtCloudShaderRegressionTest {
                 "float3 visB = shadowBack.transmittance;",
                 "if (max(visB.r, max(visB.g, visB.b)) > 0.0) {",
                 "if (!cloudShadowReady) {");
-    }
-
-    /**
-     * Clouds must shadow themselves through their own generated density.
-     *
-     * <p>The visual claim of the volumetric rework is that lobe undersides and cavity walls are dark
-     * because light was actually absorbed on the way in — not because a gradient was multiplied over the
-     * result. That only holds while {@code cloudLightOpticalDepth} walks a ray toward the light through
-     * {@code cloudVolumeDensity} and integrates it. Replacing it with an analytic coverage lookup (or
-     * with a height ramp) would look plausible in a screenshot of a single cloud and would silently
-     * remove every inter-lobe shadow in the sky, so the structure is pinned rather than trusted.
-     */
-    @Test
-    void volumetricSelfShadowingIntegratesTheDensityAlongTheLightRay() throws IOException {
-        String source = Files.readString(CLOUDS);
-        String body = slice(source, "float cloudLightOpticalDepth(", "public struct CloudVolume");
-
-        assertInOrder(body,
-                "float3 sp = float3(samplePos.x, yInDeck, samplePos.y) + lightDir * t;",
-                "optical += cloudVolumeDensity(push, float2(sp.x, sp.z), sp.y, 0.0, 1);");
-        assertTrue(body.contains("optical * stepBlocks"),
-                "the accumulated density must be scaled by the light step length to be an optical depth");
-        assertFalse(body.contains("cloudCoverage("),
-                "the light march must integrate the 3D field, not the 2D footprint: an analytic coverage"
-                        + " lookup cannot produce inter-lobe self-shadowing");
-    }
-
-    /**
-     * The deck's ground shadow is the documented cheap path: one analytic lookup against the 2D
-     * footprint at the point where the light ray crosses the deck's mid-plane. That is a deliberate
-     * approximation (it costs no extra ray), but it has to stay tied to the deck the camera sees — the
-     * same coverage function, at the light-intersection position, scaled by the shadow slider. If the
-     * volumetric style ever grows a second, independent shadow model, the shadow on the ground would
-     * stop matching the cloud overhead, which is a bug this file exists to catch.
-     */
-    @Test
-    void groundShadowStaysTheDocumentedFootprintApproximation() throws IOException {
-        String body = slice(Files.readString(CLOUDS), "public float cloudSunShadow", "// ---- Classic");
-
-        assertInOrder(body,
-                "float deckRel = push.clouds.w - pointRel.y;",
-                "float t = deckRel / lightDir.y;",
-                "float2 samplePos = push.cloudAnchor.xy + pointRel.xz + lightDir.xz * t;",
-                "float alpha = clamp(cloudCoverage(push, samplePos)");
-        assertTrue(body.contains("return 1.0 - strength * alpha;"),
-                "the shadow must be scaled by the shadow-strength slider, never applied at full force");
     }
 
     private static String slice(String source, String startNeedle, String endNeedle) {

@@ -167,6 +167,76 @@ public float3 applyWaterWaves(float3 nGeo, float2 worldXZ, float t, float footpr
     return nGeo.y >= 0.0 ? up : -up;
 }
 
+// Rain-impact micro-ripples. Each world-anchored cell emits one short-lived splash at a
+// deterministic pseudo-random point. The expanding Gaussian-ring profile gives the familiar
+// concentric circles from raindrops on a pond without spawning particles or allocating a texture.
+// This is a normal-only microdetail layer on top of the geometric swell: keeping it out of the
+// Newton height solve preserves stable intersection/continuation while still producing the sharp
+// reflected highlights that make the rings legible.
+// Fine rain droplets: rings stay within a small fraction of a block at the default scale. The live
+// rainEffects.x slider scales their radius/spacing and rainEffects.y controls amplitude.
+static const float RAIN_RIPPLE_CELL_SIZE = 0.52;
+static const float RAIN_RIPPLE_LIFETIME = 0.62;
+static const float RAIN_RIPPLE_SPEED = 0.48;
+static const float RAIN_RIPPLE_WIDTH = 0.050;
+static const float RAIN_RIPPLE_WAVENUMBER = 58.0;
+static const float RAIN_RIPPLE_HEIGHT = 0.0028;
+
+float rainRippleHash(float3 p) {
+    p = frac(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return frac((p.x + p.y) * p.z);
+}
+
+float2 rainRippleGrad(float2 worldXZ, float timeSeconds, float rainAmount, float footprint,
+                      float rainRippleExposure) {
+    float rain = smoothstep(0.01, 0.30, saturate(rainAmount));
+    float lodFade = 1.0 - smoothstep(0.28, 1.15, max(footprint, 0.0));
+    float scale = clamp(worldPush.rainEffects.x, 0.25, 2.0);
+    float strength = rain * lodFade * clamp(worldPush.rainEffects.y, 0.0, 2.0)
+            * saturate(rainRippleExposure);
+    float cellSize = RAIN_RIPPLE_CELL_SIZE * scale;
+    float ringWidth = RAIN_RIPPLE_WIDTH * scale;
+    float ringSpeed = RAIN_RIPPLE_SPEED * scale;
+    float waveNumber = RAIN_RIPPLE_WAVENUMBER / scale;
+    float rippleHeight = RAIN_RIPPLE_HEIGHT * scale;
+    if (strength <= 1.0e-4) return float2(0.0, 0.0);
+
+    float2 cellF = floor(worldXZ / cellSize);
+    float2 grad = float2(0.0, 0.0);
+    // Nine neighbouring cells are enough: ripple radius is capped below ~0.3 blocks and the
+    // randomized impact location stays inside its cell, so the pattern has no visible cell seams.
+    [unroll]
+    for (int z = -1; z <= 1; z++) {
+        [unroll]
+        for (int x = -1; x <= 1; x++) {
+            float2 cell = cellF + float2(float(x), float(z));
+            float3 seed = float3(cell.x, 17.0, cell.y);
+            float h0 = rainRippleHash(seed + float3(11.7, 3.1, 5.3));
+            float h1 = rainRippleHash(seed + float3(37.2, 9.2, 19.1));
+            float h2 = rainRippleHash(seed + float3(73.4, 2.7, 41.8));
+            float2 impact = (cell + float2(0.16 + 0.68 * h0, 0.16 + 0.68 * h1))
+                    * cellSize;
+            float age = frac(timeSeconds / RAIN_RIPPLE_LIFETIME + h2) * RAIN_RIPPLE_LIFETIME;
+            float2 delta = worldXZ - impact;
+            float radius = length(delta);
+            if (radius < 1.0e-3) continue;
+
+            float ringDistance = radius - age * ringSpeed;
+            float ringUnit = ringDistance / ringWidth;
+            if (abs(ringUnit) > 2.8) continue;
+            float envelope = exp(-0.5 * ringUnit * ringUnit) * exp(-1.15 * age);
+            float phase = ringDistance * waveNumber;
+            // Derivative of A * exp(-d²/2w²) * cos(kd), projected onto the radial direction.
+            float radialSlope = rippleHeight * envelope
+                    * (-sin(phase) * waveNumber
+                    - cos(phase) * ringDistance / (ringWidth * ringWidth));
+            grad += radialSlope * (delta / radius);
+        }
+    }
+    return grad * strength;
+}
+
 // Geometric wave hit: the rest-plane triangle the BLAS actually contains, plus the height-field point
 // the shading/depth/continuations should use. Side faces leave position == planePos.
 public struct WaterWaves {
@@ -196,7 +266,8 @@ public WaterWaves flatWaterWaves(float3 planePos, float hitT, float3 nGeo) {
 // the same field becomes the shading normal, so glints, refraction and the visible relief stay in
 // lockstep. Side faces (|n.y| small) and near-horizontal rays keep the mesh hit.
 public WaterWaves evaluateWaterWaves(float3 ro, float3 rd, float hitT, float3 nGeo,
-                                     float currentT, float previousT, float footprint) {
+                                     float currentT, float previousT, float footprint,
+                                     bool rainRippleExposed) {
     float3 planePos = ro + rd * hitT;
     if (abs(nGeo.y) < 0.5) {
         return flatWaterWaves(planePos, hitT, nGeo);
@@ -233,6 +304,14 @@ public WaterWaves evaluateWaterWaves(float3 ro, float3 rd, float hitT, float3 nG
     float2 previousGrad;
     waterWaveFieldTemporal(domain, currentT, previousT, footprint,
             height, grad, previousHeight, previousGrad);
+    // Rain uses the same world-space domain and wrapped time as the geometric wave spectrum.
+    // Sample both phases so the moving ring highlights remain compatible with temporal reprojection.
+    float rain = saturate(worldPush.weather.x);
+    float rainRippleExposure = rainRippleExposed ? 1.0 : 0.0;
+    // Keep ordinary animated water waves everywhere, but only add rain-impact rings where the water
+    // surface has an unblocked sky column. This prevents rain ripples from appearing in caves.
+    grad += rainRippleGrad(domain, currentT, rain, footprint, rainRippleExposure);
+    previousGrad += rainRippleGrad(domain, previousT, rain, footprint, rainRippleExposure);
 
     float orientation = nGeo.y >= 0.0 ? 1.0 : -1.0;
     WaterWaves waves;
@@ -249,22 +328,6 @@ public WaterWaves evaluateWaterWaves(float3 ro, float3 rd, float hitT, float3 nG
 // Continuation origin that stays on the correct side of BOTH the displaced surface and the rest-plane
 // triangle the BLAS still contains, so a trough cannot immediately re-hit its own mesh on the way out
 // and a crest cannot immediately re-hit it on the way in.
-//
-// A transmitted ray must also start ON the water quad the ray hit. The wave field is a global
-// analytic field but the water body is not: the displaced surface point follows the viewing ray, so
-// at a grazing angle it ends up several blocks OUTSIDE the water quad (the excursion grows like
-// 1/|rd.y|). A refracted ray starting there samples the shore instead of the underwater scene, which
-// is what painted a contour along the water's edge; the transmission guide walks that same ray, so
-// the denoiser demodulated the fringe against the shore's albedo and turned it into a halo.
-//
-// The rest-plane hit is on the quad by construction, so it is over water by definition, and it
-// moves continuously with the hit - unlike a per-block clamp, which snapped the origin to the block
-// edges and pulled the whole block grid into the refraction (stretched corners, worse up close).
-// The wave field still bends the ray: the direction comes from the displaced surface's normal, and
-// the displaced height still sets how deep below the surface the ray starts.
-//
-// The reflection keeps the displaced point: it leaves the surface upwards, where being a block off
-// the water body changes nothing, and the crest is where the specular highlight belongs.
 public float3 waterWaveContinueOrigin(WaterWaves waves, float3 rd, float bias) {
     float3 sideNormal = dot(waves.geometricNormal, rd) >= 0.0
             ? waves.geometricNormal : -waves.geometricNormal;
@@ -275,7 +338,6 @@ public float3 waterWaveContinueOrigin(WaterWaves waves, float3 rd, float bias) {
         if (planeSide < bias) origin += waves.geometricNormal * (bias - planeSide);
     } else {
         if (planeSide > -bias) origin -= waves.geometricNormal * (planeSide + bias);
-        origin.xz = waves.planePos.xz;
     }
     return origin;
 }

@@ -1,0 +1,404 @@
+# Caustica RT renderer configuration.
+# A matching -Dcaustica.* system property overrides the value below.
+# Managed by Caustica to apply one-time migrations to existing config files.
+config-version = 1
+enabled = true
+worker-threads = 4
+
+# Per-frame path-tracing controls.
+# subsurface-scattering: LabPBR SSS (backlit foliage). Costs one extra shadow ray per
+# eligible vertex; off disables the effect entirely.
+# weather-lighting: attenuate sun/moon light and darken the sky during rain and
+# thunderstorms. Off keeps clear-sky lighting in all weather.
+# denoiser: the DLSS Ray Reconstruction denoise+upscale filter. Off presents the raw
+# path-traced image at full resolution (noisy reference view). Requires dlss-rr.enabled.
+# water-wave-strength/-speed/-detail: height multiplier, animation speed and spectrum
+# component count for Animated Water. parallax-quality: multiplier on the POM
+# texel-crossing budget (sampling level), independent of parallax-strength (relief depth).
+# wetness-*, ground-rain-ripples and water-ripple-* tune the live rain surface response.
+# rain-refraction-* controls streak lensing; underwater-* controls short-visibility blue haze, light-sourced scattering and sky-miss attenuation;
+# rain-cloud-density limits how much extra coverage storm weather adds.
+[composite]
+	debug-view = 0
+	spp = 1
+	max-bounces = 8
+	water-waves = true
+	jitter-sign-x = 1.0
+	jitter-sign-y = -1.0
+	sun-angular-radius-deg = 0.6
+	moon-angular-radius-deg = 1.5
+	sun-noon-south-tilt-deg = 30.0
+	water-opacity = 0.0
+	water-wave-strength = 1.0
+	water-wave-speed = 1.0
+	water-wave-detail = 7
+	parallax = true
+	parallax-strength = 1.25
+	parallax-smoothing = true
+	parallax-distance = 64.0
+	parallax-quality = 1.0
+	subsurface-scattering = true
+	weather-lighting = true
+	denoiser = true
+	clouds = true
+	cloud-style = "volumetric"
+	cloud-thickness = 0.15
+	cloud-shadow-strength = 1.0
+	cloud-opacity = 0.5
+	cloud-height = 192.0
+	cloud-coverage = 0.4
+	fog = true
+	fog-density = 0.1
+	fog-distance = 160.0
+	fog-anisotropy = 0.55
+	fog-height-falloff = 0.0
+	fog-biome-tint = 1.0
+	wetness-enabled = true
+	wetness-wet-seconds = 5.0
+	wetness-dry-seconds = 30.0
+	wetness-gloss = 1.0
+	ground-rain-ripples = true
+	ground-ripple-strength = 1.0
+	water-rain-ripples = true
+	water-ripple-scale = 0.65
+	water-ripple-strength = 1.0
+	rain-refraction-enabled = true
+	rain-refraction-strength = 2.0
+	underwater-haze-enabled = true
+	underwater-haze-strength = 0.1
+	underwater-blue-tint = 0.5
+	underwater-sky-enabled = true
+	underwater-sky-distance = 128.0
+	rain-cloud-response = true
+	rain-cloud-density = 0.5
+	lightning-enabled = true
+	lightning-intensity = 1.5
+	lightning-sound-enabled = true
+	lightning-sound-volume = 1.0
+	lightning-strikes-per-minute = 2.0
+	wetness-transition-distance = 6.0
+
+# Experimental SHaRC (NVIDIA Spatial Hash Radiance Cache). A shader-only world-space
+# radiance cache: early bounces warm a voxel hash with the local light they see,
+# and later diffuse bounces query it instead of tracing another noisy continuation.
+# cell-size is the voxel edge in blocks; cache-entries is the flat hash capacity;
+# update-coverage is the fraction of warm paths that write; temporal-blend is how
+# much a new estimate changes an existing entry; start-bounce is the first bounce
+# allowed to query; strength scales the cached indirect tail; max-distance bounds
+# how far from a cell centre a query may use it; frame-lifetime is how long an
+# entry stays fresh; normal-threshold is the minimum normal agreement for a hit;
+# stable-frames is how many frames a freshly written cell must age before the
+# tracer may use it (guards against the new-cell brightness flash).
+# debug: log SHaRC state transitions and a periodic parameter summary to the console.
+[sharc]
+	enabled = true
+	cache-exponent = 22
+	anti-firefly = true
+	primary-surface-debug = false
+	update-tile-size = 3
+	accumulation-frames = 384
+	stale-frames = 128
+	scene-scale = 32.0
+	radiance-scale = 1000.0
+	grid-logarithm-base = 3.0
+	grid-level-bias = 0.0
+	roughness-threshold = 0.0
+	cell-size = 2.0
+	cache-entries = 262144
+	update-coverage = 0.35
+	temporal-blend = 0.125
+	start-bounce = 2
+	strength = 1.0
+	max-distance = 96.0
+	frame-lifetime = 120
+	normal-threshold = 0.35
+	stable-frames = 1
+	debug = false
+
+# Render-thread terrain work is bounded by dispatch/result counts per streaming pass.
+# Buffer fill and BLAS/OMM preparation run on workers. max-inflight-sections bounds
+# the complete snapshot -> worker -> GPU build -> publication lifecycle.
+[terrain]
+	async-dispatch-per-tick = 32
+	section-results-per-tick = 32
+	max-inflight-sections = 32
+	section-table-initial-capacity = 512
+	rebase-distance-blocks = 128
+	blas-compaction = true
+
+[omm]
+	enabled = true
+	subdivision = 4
+	stats = false
+
+# Direct lighting controls. held-item-light toggles the analytic light a luminous held
+# item casts (torch in hand lighting up a cave); each item casts its own colour.
+# dynamic-intensity scales that held-item light and other dynamic emitters;
+# block-emissive-intensity scales emissive blocks placed in the world, both their
+# direct-hit emission and sampled area-light contribution. The toggle, both intensity
+# sliders and ReSTIR sampling are exposed in the Video Settings screen. restir-sampling reuses
+# validated light reservoirs across frames and nearby pixels; off keeps the original
+# independent RIS estimator. ris-candidates = 0 disables emitter NEE entirely
+# (emitters just gather on direct hit). min-fill-ratio drops sparse emissive
+# footprints from the light buffer. stats/dump/dump-radius are debug logging.
+# restir-temporal-history / restir-spatial-neighbours / restir-max-age are the live
+# anti-flicker tuning pushed in WorldPush.restirTuning: more history and more
+# neighbours damp sampling flicker at the price of ghosting/overhead; max-age bounds
+# how long a reservoir may survive (4..240, the packed age field is 8-bit).
+[lights]
+	ris-candidates = 8
+	min-fill-ratio = 0.25
+	stats = false
+	dump = false
+	dump-radius = 12
+	held-item-light = true
+	dynamic-intensity = 1.0
+	block-emissive-intensity = 2.0
+	restir-sampling = true
+	restir-temporal-history = 4
+	restir-spatial-neighbours = 4
+	restir-max-age = 30
+
+[entities]
+	enabled = true
+	max-ordinary-entities = 1024
+
+	[entities.glow]
+		enabled = true
+
+	[entities.name-tags]
+		enabled = true
+
+	[entities.debug]
+		capture-parity = false
+
+	[entities.block-entities]
+		max-entities = 1024
+		view-chunks = 8
+		builds-per-frame = 64
+
+	[entities.refit]
+		enabled = true
+
+	[entities.textures]
+		max-textures = 256
+		pbr = true
+
+[particles]
+	enabled = true
+	max-particles = 1024
+	weather-enabled = true
+	rain-density = 0.6
+
+[dlss-rr]
+	enabled = true
+	preset = 6
+	quality = 0
+
+# DLSS Neural Rendering. Requires the separately supplied signed feature DLL.
+# Preset/quality changes recreate the feature; style and strength controls apply live.
+[dlss-neural-rendering]
+	enabled = false
+	performance-quality = 0
+	render-preset = 0
+	style = 0
+	intensity = 1.0
+	local-tone-strength = 1.0
+	local-structure-strength = 1.0
+	skin-structure-strength = -1.0
+	auto-mask = true
+
+# DLSS Frame Generation. Default off; gated additionally by hardware/driver availability
+# (the driver's NGX capability query reports FrameGeneration_Available; RTX 40/50 series only).
+# multi-frame-count: frames generated per rendered frame (1 = 2x, 2 = 3x, ...), clamped
+# at runtime to the driver's reported DLSSG.MultiFrameCountMax.
+[frame-generation]
+	enabled = false
+	multi-frame-count = 1
+	native-engine = true
+
+# NVIDIA Reflex (VK_NV_low_latency2). Default off; gated additionally by device support.
+# minimum-interval-us: 0 = no framerate cap (Reflex just paces submission).
+[reflex]
+	enabled = false
+	low-latency-boost = false
+	minimum-interval-us = 0
+
+# Controls automatic exposure. manual-ev sets exposure in manual mode and adjusts it in auto mode.
+# adapt-darken and adapt-brighten control adjustment speed in seconds.
+# sky-weight-cap and emissive-weight-cap limit how much bright areas affect exposure.
+[exposure]
+	mode = "auto"
+	manual-ev = 0.0
+	key = 0.18
+	adapt-darken = 2.0
+	adapt-brighten = 0.4
+	low-percentile = 0.5
+	high-percentile = 0.95
+	stride = 2
+	center-weight-sigma = 0.35
+	center-weight-floor = 0.15
+	sky-weight-cap = 0.25
+	emissive-weight-cap = 0.1
+	pre-exposure = true
+	min-ev = -1.5
+	max-ev = 4.0
+	adapt-up = 0.12
+	adapt-down = 0.35
+
+# Scene tonemapping after exposure and before writing the vanilla SDR target. operator selects
+# the curve; exposure-ev is an extra post-exposure bias; gamma/saturation/contrast
+# are final look controls shared by all operators.
+[tonemap]
+	gamma = 1.5
+	operator = "psychov"
+	exposure-ev = 0.5
+	saturation = 1.05
+	contrast = 1.0
+
+[sdr]
+	tone-mapper = "psychov30"
+
+	[sdr.agx]
+		contrast = 1.0
+		saturation = 1.0
+
+	[sdr.pbr-neutral]
+		start-compression = 0.76
+		desaturation = 0.15
+
+	[sdr.reinhard]
+		white-point = 4.0
+
+	[sdr.aces]
+		exposure = 1.0
+
+	[sdr.lottes]
+		contrast = 1.0
+		shoulder = 1.0
+		hdr-max = 16.0
+		mid-in = 0.18
+		mid-out = 0.18
+
+	[sdr.uncharted2]
+		a = 0.15
+		b = 0.5
+		c = 0.1
+		d = 0.2
+		e = 0.02
+		f = 0.3
+		white-point = 11.2
+
+	[sdr.gt]
+		contrast = 1.0
+		linear-start = 0.22
+		linear-length = 0.4
+		black-curve = 1.33
+		black-lift = 0.0
+
+	[sdr.psychov24]
+		compression = 1.0
+		gamut-compression = 1.0
+		highlights = 1.0
+		shadows = 1.0
+		contrast = 1.0
+		purity = 1.0
+
+	[sdr.psychov30]
+		compression = 0.0
+		gamut-compression = 1.0
+		highlights = 1.0
+		shadows = 1.0
+		contrast = 1.0
+		purity = 1.0
+
+# HDR display output (ST.2084/PQ). When enabled the swapchain is created in PQ automatically
+# (falls back to SDR if the surface doesn't advertise it). paper-white-nits / peak-nits
+# drive the scene-HDR -> display mapping.
+[hdr]
+	enabled = false
+	ui-nits = 200.0
+	paper-white-nits = 200.0
+	tone-mapper = "aces2.0"
+	peak-nits = 1000.0
+
+	[hdr.psychov24]
+		compression = 0.0
+		gamut-compression = 1.0
+		highlights = 1.0
+		shadows = 1.0
+		contrast = 1.0
+		purity = 1.0
+
+	[hdr.psychov30]
+		compression = 0.0
+		gamut-compression = 1.0
+		highlights = 1.0
+		shadows = 1.0
+		contrast = 1.0
+		purity = 1.0
+
+[frame-stats]
+	enabled = false
+
+# exr-enabled saves an ACEScg EXR beside the normal F2 PNG while ray tracing is active.
+[screenshots]
+	exr-enabled = false
+
+[diagnostics]
+	heavy-crash-diagnostics = false
+
+	[overlay.block-outline]
+		enabled = true
+
+# Ray-marched volumetric clouds. Coverage and density shape the volume; altitude and thickness set the cloud layer; speed controls horizontal drift.
+[clouds]
+	enabled = true
+	coverage = 0.55
+	density = 0.85
+	altitude = 192.0
+	thickness = 64.0
+	speed = 1.0
+
+# Material appearance controls. metallic-shininess reduces roughness only on authored metallic
+# surfaces; 0 preserves resource-pack material data and 1 gives metals their strongest shine.
+[materials]
+	metallic-shininess = 1.0
+
+# AMD FSR 3 upscaling (experimental): upscales the path-traced image WITHOUT denoising,
+# so raw-trace noise is handled by the renderer's denoiser (SVGF or NRD). quality
+# mirrors the DLSS PerfQuality numbering (0 Performance, 1 Balanced, 2 Quality,
+# 3 Ultra Performance, 5 native AA). The runtime is bundled for Windows only for
+# now; elsewhere the upscaler selector does not offer FSR 3.
+[fsr]
+	enabled = false
+	quality = 2
+
+[xess]
+	enabled = false
+	quality = 2
+
+# The renderer's own denoiser (SVGF): geometry-validated temporal reprojection with
+# luminance moments, then a variance-guided a-trous wavelet cascade. Default on and
+# used by every non-DLSS path; DLSS Ray Reconstruction denoises internally instead,
+# and switching NRD on hands the slot to REBLUR.
+[denoise]
+	enabled = true
+
+# NRD (NVIDIA Real-time Denoisers) REBLUR denoising: the optional alternative to the
+# built-in denoiser, running on demodulated per-lobe radiance so diffuse and specular
+# are filtered separately. Denoises at render resolution; combine with FSR 3 / XeSS
+# (or no upscaler) for the display. Requires the bundled NRD natives (Windows) and is
+# mutually exclusive with both DLSS and the built-in denoiser.
+# validation: REBLUR's diagnostic overlay; replaces the image with NRD's debug grid.
+[nrd]
+	enabled = false
+	validation = false
+
+# First-person viewmodel (held item / arm) controls.
+# fov-follows-camera: false (vanilla) renders the hand through its own fixed 70-degree
+# projection, isolated from the FOV setting. true scales that projection to the
+# configured FOV instead, so raising the FOV pushes the arm away and lowering it pulls
+# the arm closer, the way the rest of the scene reacts.
+[hand]
+	fov-follows-camera = false

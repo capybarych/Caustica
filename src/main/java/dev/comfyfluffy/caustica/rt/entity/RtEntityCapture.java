@@ -60,12 +60,10 @@ public final class RtEntityCapture implements VertexConsumer {
     // block-entity portal geometry (EndPortalRenderer's quad, endermen holding portal blocks) with
     // the procedural portal surfaces instead of the flat atlas texture.
     int currentPortalFlags;
-    // Extra per-prim flags for the current submission, OR-ed into the same flags lane. Two consumers
-    // today: the weather capture (PRIM_FLAG_WEATHER: rain/snow sheets must reach raygen tagged so they
-    // can be shaded UNLIT — the path tracer's light response was visibly breaking them) and the glint
-    // paths (PRIM_FLAG_GLINT: enchantment/foil overlays are special-captured like the portal surfaces,
-    // so world.rchit shades them with an animated self-lit branch). Particles share the flags lane but
-    // never carry portal tags, so these bits are unambiguous there.
+    // Extra per-prim flags for the current submission, OR-ed into the same flags lane. PRIM_FLAG_WEATHER
+    // is shared by weather columns and vanilla rain-impact/splash particles so both take the same neutral,
+    // stochastic-alpha, refractive shader path. PRIM_FLAG_GLINT tags enchantment/foil overlays. Particles
+    // share the flags lane but never carry portal tags, so these bits are unambiguous there.
     int currentPrimFlags;
     /** Mirrors world_common.slang's PRIM_WEATHER. */
     static final int PRIM_FLAG_WEATHER = 16;
@@ -468,7 +466,6 @@ public final class RtEntityCapture implements VertexConsumer {
     @Override public VertexConsumer setUv(float u, float v) { return this; }
     @Override public VertexConsumer setUv1(int u, int v) { return this; }
     @Override public VertexConsumer setUv2(int u, int v) { return this; }
-    @Override public VertexConsumer setUv3(float u, float v) { return this; }
     @Override public VertexConsumer setNormal(float x, float y, float z) { return this; }
     @Override public VertexConsumer setLineWidth(float width) { return this; }
 }

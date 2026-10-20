@@ -116,6 +116,62 @@ public final class RtSubScreens {
                 reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.waterOptions())));
     }
 
+    /** Ground wetness, wet-film gloss, and impact ripples. */
+    public static RtSettingsSubScreen wetness(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.wetnessHeader"),
+                wetnessSettings(), RtSubScreens::wetness,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.groundWetnessOptions())));
+    }
+
+    /** Water-surface impact ripples only; weather-sheet refraction has its own page. */
+    public static RtSettingsSubScreen rainOptics(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.waterRainRipplesHeader"),
+                waterRainRippleSettings(), RtSubScreens::rainOptics,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.waterRainRippleOptions())));
+    }
+
+    /** Translucent glass-like refraction through weather droplets. */
+    public static RtSettingsSubScreen rainRefraction(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.rainRefractionHeader"),
+                rainRefractionSettings(), RtSubScreens::rainRefraction,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.rainRefractionOptions())));
+    }
+
+    /** Blue depth haze, source-coupled scattering and underwater sun shafts. */
+    public static RtSettingsSubScreen underwater(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.underwaterHazeHeader"),
+                underwaterHazeSettings(), RtSubScreens::underwater,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.underwaterHazeOptions())));
+    }
+
+    /** Water-column handling for rays which miss the water surface at the horizon. */
+    public static RtSettingsSubScreen underwaterSky(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.underwaterSkyHeader"),
+                underwaterSkySettings(), RtSubScreens::underwaterSky,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.underwaterSkyOptions())));
+    }
+
+    /** Weather-driven cloud response and the maximum coverage added by rain. */
+    public static RtSettingsSubScreen rainClouds(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.rainCloudsHeader"),
+                rainCloudSettings(), RtSubScreens::rainClouds,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.rainCloudOptions())));
+    }
+
+    /** Procedural lightning during rain, including average strike frequency and brightness. */
+    public static RtSettingsSubScreen lightning(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.lightningHeader"),
+                lightningSettings(), RtSubScreens::lightning,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.lightningOptions())));
+    }
+
     /** Parallax Occlusion Mapping: depth, sampling level, smoothing and fade distance. */
     public static RtSettingsSubScreen pom(Screen parent) {
         return new RtSettingsSubScreen(parent, options(),
@@ -164,14 +220,6 @@ public final class RtSubScreens {
                 Component.translatable("caustica.options.rt.tonemapHeader"),
                 tonemapSettings(), RtSubScreens::tonemap,
                 reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.tonemapOptions())));
-    }
-
-    /** Screen-space multi-scale HDR bloom controls. */
-    public static RtSettingsSubScreen bloom(Screen parent) {
-        return new RtSettingsSubScreen(parent, options(),
-                Component.translatable("caustica.options.rt.bloomHeader"),
-                bloomSettings(), RtSubScreens::bloom,
-                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.bloomOptions())));
     }
 
     /** HDR output and the scene-to-display nit mapping. */
@@ -287,6 +335,51 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Composite.WATER_WAVE_DETAIL);
     }
 
+    private static List<CausticaConfig.RuntimeSetting<?>> wetnessSettings() {
+        return List.of(CausticaConfig.Rt.Composite.WETNESS_ENABLED,
+                CausticaConfig.Rt.Composite.WETNESS_WET_SECONDS,
+                CausticaConfig.Rt.Composite.WETNESS_DRY_SECONDS,
+                CausticaConfig.Rt.Composite.WETNESS_GLOSS,
+                CausticaConfig.Rt.Composite.WETNESS_TRANSITION_DISTANCE,
+                CausticaConfig.Rt.Composite.GROUND_RAIN_RIPPLES,
+                CausticaConfig.Rt.Composite.GROUND_RIPPLE_STRENGTH);
+    }
+
+    private static List<CausticaConfig.RuntimeSetting<?>> waterRainRippleSettings() {
+        return List.of(CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES,
+                CausticaConfig.Rt.Composite.WATER_RIPPLE_SCALE,
+                CausticaConfig.Rt.Composite.WATER_RIPPLE_STRENGTH);
+    }
+
+    private static List<CausticaConfig.RuntimeSetting<?>> rainRefractionSettings() {
+        return List.of(CausticaConfig.Rt.Composite.RAIN_REFRACTION_ENABLED,
+                CausticaConfig.Rt.Composite.RAIN_REFRACTION_STRENGTH);
+    }
+
+    private static List<CausticaConfig.RuntimeSetting<?>> underwaterHazeSettings() {
+        return List.of(CausticaConfig.Rt.Composite.UNDERWATER_HAZE_ENABLED,
+                CausticaConfig.Rt.Composite.UNDERWATER_HAZE_STRENGTH,
+                CausticaConfig.Rt.Composite.UNDERWATER_BLUE_TINT);
+    }
+
+    private static List<CausticaConfig.RuntimeSetting<?>> underwaterSkySettings() {
+        return List.of(CausticaConfig.Rt.Composite.UNDERWATER_SKY_ENABLED,
+                CausticaConfig.Rt.Composite.UNDERWATER_SKY_DISTANCE);
+    }
+
+    private static List<CausticaConfig.RuntimeSetting<?>> rainCloudSettings() {
+        return List.of(CausticaConfig.Rt.Composite.RAIN_CLOUD_RESPONSE,
+                CausticaConfig.Rt.Composite.RAIN_CLOUD_DENSITY);
+    }
+
+    private static List<CausticaConfig.RuntimeSetting<?>> lightningSettings() {
+        return List.of(CausticaConfig.Rt.Composite.LIGHTNING_ENABLED,
+                CausticaConfig.Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE,
+                CausticaConfig.Rt.Composite.LIGHTNING_INTENSITY,
+                CausticaConfig.Rt.Composite.LIGHTNING_SOUND_ENABLED,
+                CausticaConfig.Rt.Composite.LIGHTNING_SOUND_VOLUME);
+    }
+
     private static List<CausticaConfig.RuntimeSetting<?>> pomSettings() {
         return List.of(
                 CausticaConfig.Rt.Composite.PARALLAX_ENABLED,
@@ -296,11 +389,6 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Composite.PARALLAX_DISTANCE);
     }
 
-    /**
-     * Every cloud setting the page can show, in both styles — including the rows the current style
-     * hides. "Reset to Defaults" on this page restores all of them, so flipping style after a reset
-     * never surfaces a stale value.
-     */
     private static List<CausticaConfig.RuntimeSetting<?>> cloudsSettings() {
         return List.of(
                 CausticaConfig.Rt.Composite.CLOUDS,
@@ -308,8 +396,6 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Composite.CLOUD_COVERAGE,
                 CausticaConfig.Rt.Composite.CLOUD_HEIGHT,
                 CausticaConfig.Rt.Composite.CLOUD_THICKNESS,
-                CausticaConfig.Rt.Composite.CLOUD_MIN_THICKNESS,
-                CausticaConfig.Rt.Composite.CLOUD_MAX_THICKNESS,
                 CausticaConfig.Rt.Composite.CLOUD_SHADOW_STRENGTH,
                 CausticaConfig.Rt.Composite.CLOUD_OPACITY);
     }
@@ -341,17 +427,6 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Tonemapping.GAMMA,
                 CausticaConfig.Rt.Tonemapping.SATURATION,
                 CausticaConfig.Rt.Tonemapping.CONTRAST);
-    }
-
-    private static List<CausticaConfig.RuntimeSetting<?>> bloomSettings() {
-        return List.of(
-                CausticaConfig.Rt.Bloom.ENABLED,
-                CausticaConfig.Rt.Bloom.QUALITY,
-                CausticaConfig.Rt.Bloom.INTENSITY,
-                CausticaConfig.Rt.Bloom.THRESHOLD,
-                CausticaConfig.Rt.Bloom.SOFT_KNEE,
-                CausticaConfig.Rt.Bloom.RADIUS,
-                CausticaConfig.Rt.Bloom.COLOR_INFLUENCE);
     }
 
     private static List<CausticaConfig.RuntimeSetting<?>> hdrSettings() {
@@ -394,11 +469,17 @@ public final class RtSubScreens {
                 worldSettings(),
                 effectsSettings(),
                 waterSettings(),
+                wetnessSettings(),
+                waterRainRippleSettings(),
+                rainRefractionSettings(),
+                underwaterHazeSettings(),
+                underwaterSkySettings(),
+                rainCloudSettings(),
+                lightningSettings(),
                 pomSettings(),
                 cloudsSettings(),
                 exposureSettings(),
                 tonemapSettings(),
-                bloomSettings(),
                 hdrSettings(),
                 streamingSettings(),
                 debugSettings(),

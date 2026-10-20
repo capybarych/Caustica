@@ -162,6 +162,102 @@ public final class RtVideoOptions {
         };
     }
 
+    /** Ground wetting timings, gloss, and small rain-impact ripples. */
+    public static OptionInstance<?>[] groundWetnessOptions() {
+        return new OptionInstance<?>[] { wetnessEnabled(), wetnessWetSeconds(), wetnessDrySeconds(), wetnessGloss(),
+                wetnessTransitionDistance(), groundRainRipples(), groundRippleStrength() };
+    }
+    /** Water ripple scale/intensity and glass-like weather-sheet refraction. */
+    public static OptionInstance<?>[] rainOpticsOptions() {
+        return new OptionInstance<?>[] { waterRainRipples(), waterRippleScale(), waterRippleStrength(),
+                rainRefractionEnabled(), rainRefractionStrength() };
+    }
+    /** Underwater haze controls. */
+    public static OptionInstance<?>[] underwaterOptions() {
+        return underwaterHazeOptions();
+    }
+    /** Water impact ripples, isolated from the separate rain-lens control. */
+    public static OptionInstance<?>[] waterRainRippleOptions() {
+        return new OptionInstance<?>[] { waterRainRipples(), waterRippleScale(), waterRippleStrength() };
+    }
+    /** Glass-like refraction through rain streaks. */
+    public static OptionInstance<?>[] rainRefractionOptions() {
+        return new OptionInstance<?>[] { rainRefractionEnabled(), rainRefractionStrength() };
+    }
+    /** Underwater short-visibility haze, water tint, and source-lit scattering controls. */
+    public static OptionInstance<?>[] underwaterHazeOptions() {
+        return new OptionInstance<?>[] { underwaterHazeEnabled(), underwaterHazeStrength(), underwaterBlueTint() };
+    }
+    /** Water-horizon fallback that prevents a missed underwater sky ray from drawing a hard black tile. */
+    public static OptionInstance<?>[] underwaterSkyOptions() {
+        return new OptionInstance<?>[] { underwaterSkyEnabled(), underwaterSkyDistance() };
+    }
+    /** Rain-responsive cloud coverage. */
+    public static OptionInstance<?>[] rainCloudOptions() {
+        return new OptionInstance<?>[] { rainCloudResponse(), rainCloudDensity() };
+    }
+
+    /** Random lightning bolts, inter-strike timing, visual intensity and positional thunder audio. */
+    public static OptionInstance<?>[] lightningOptions() {
+        return new OptionInstance<?>[] { lightningEnabled(), lightningStrikesPerMinute(), lightningIntensity(),
+                lightningSoundEnabled(), lightningSoundVolume() };
+    }
+
+    private static OptionInstance<Boolean> wetnessEnabled() { return bool("caustica.options.rt.wetnessEnabled", CausticaConfig.Rt.Composite.WETNESS_ENABLED); }
+    private static OptionInstance<Integer> wetnessWetSeconds() { return secondsOption("caustica.options.rt.wetnessWetSeconds", CausticaConfig.Rt.Composite.WETNESS_WET_SECONDS, 1, 30); }
+    private static OptionInstance<Integer> wetnessDrySeconds() { return secondsOption("caustica.options.rt.wetnessDrySeconds", CausticaConfig.Rt.Composite.WETNESS_DRY_SECONDS, 5, 120); }
+    private static OptionInstance<Integer> wetnessGloss() { return percent("caustica.options.rt.wetnessGloss", CausticaConfig.Rt.Composite.WETNESS_GLOSS); }
+    private static OptionInstance<Integer> wetnessTransitionDistance() { return blocksOption("caustica.options.rt.wetnessTransitionDistance", CausticaConfig.Rt.Composite.WETNESS_TRANSITION_DISTANCE, 0, 12); }
+    private static OptionInstance<Boolean> groundRainRipples() { return bool("caustica.options.rt.groundRainRipples", CausticaConfig.Rt.Composite.GROUND_RAIN_RIPPLES); }
+    private static OptionInstance<Integer> groundRippleStrength() { return multiplier("caustica.options.rt.groundRippleStrength", CausticaConfig.Rt.Composite.GROUND_RIPPLE_STRENGTH, 0, 20); }
+    private static OptionInstance<Boolean> waterRainRipples() { return bool("caustica.options.rt.waterRainRipples", CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES); }
+    private static OptionInstance<Integer> waterRippleScale() { return scaleOption("caustica.options.rt.waterRippleScale", CausticaConfig.Rt.Composite.WATER_RIPPLE_SCALE); }
+    private static OptionInstance<Integer> waterRippleStrength() { return multiplier("caustica.options.rt.waterRippleStrength", CausticaConfig.Rt.Composite.WATER_RIPPLE_STRENGTH, 0, 20); }
+    private static OptionInstance<Boolean> rainRefractionEnabled() { return bool("caustica.options.rt.rainRefractionEnabled", CausticaConfig.Rt.Composite.RAIN_REFRACTION_ENABLED); }
+    private static OptionInstance<Integer> rainRefractionStrength() { return multiplier("caustica.options.rt.rainRefractionStrength", CausticaConfig.Rt.Composite.RAIN_REFRACTION_STRENGTH, 0, 20); }
+    private static OptionInstance<Boolean> underwaterHazeEnabled() { return bool("caustica.options.rt.underwaterHazeEnabled", CausticaConfig.Rt.Composite.UNDERWATER_HAZE_ENABLED); }
+    private static OptionInstance<Integer> underwaterHazeStrength() { return multiplier("caustica.options.rt.underwaterHazeStrength", CausticaConfig.Rt.Composite.UNDERWATER_HAZE_STRENGTH, 0, 20); }
+    private static OptionInstance<Integer> underwaterBlueTint() { return percent("caustica.options.rt.underwaterBlueTint", CausticaConfig.Rt.Composite.UNDERWATER_BLUE_TINT); }
+    private static OptionInstance<Boolean> underwaterSkyEnabled() { return bool("caustica.options.rt.underwaterSkyEnabled", CausticaConfig.Rt.Composite.UNDERWATER_SKY_ENABLED); }
+    private static OptionInstance<Integer> underwaterSkyDistance() { return blocksOption("caustica.options.rt.underwaterSkyDistance", CausticaConfig.Rt.Composite.UNDERWATER_SKY_DISTANCE, 8, 128); }
+    private static OptionInstance<Boolean> rainCloudResponse() { return bool("caustica.options.rt.rainCloudResponse", CausticaConfig.Rt.Composite.RAIN_CLOUD_RESPONSE); }
+    private static OptionInstance<Integer> rainCloudDensity() { return percent("caustica.options.rt.rainCloudDensity", CausticaConfig.Rt.Composite.RAIN_CLOUD_DENSITY); }
+    private static OptionInstance<Boolean> lightningEnabled() { return bool("caustica.options.rt.lightningEnabled", CausticaConfig.Rt.Composite.LIGHTNING_ENABLED); }
+    private static OptionInstance<Integer> lightningStrikesPerMinute() { return perMinuteOption("caustica.options.rt.lightningStrikesPerMinute", CausticaConfig.Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE, 1, 60); }
+    private static OptionInstance<Integer> lightningIntensity() { return multiplier("caustica.options.rt.lightningIntensity", CausticaConfig.Rt.Composite.LIGHTNING_INTENSITY, 0, 50); }
+    private static OptionInstance<Boolean> lightningSoundEnabled() { return bool("caustica.options.rt.lightningSoundEnabled", CausticaConfig.Rt.Composite.LIGHTNING_SOUND_ENABLED); }
+    private static OptionInstance<Integer> lightningSoundVolume() { return multiplier("caustica.options.rt.lightningSoundVolume", CausticaConfig.Rt.Composite.LIGHTNING_SOUND_VOLUME, 0, 20); }
+
+    private static OptionInstance<Integer> secondsOption(String key, FloatSetting setting, int min, int max) {
+        return new OptionInstance<>(key,
+                OptionInstance.cachedConstantTooltip(Component.translatable(key + ".tooltip")),
+                (caption, value) -> Options.genericValueLabel(caption, Component.literal(value + " s")),
+                new OptionInstance.IntRange(min, max), Math.clamp(Math.round(setting.value()), min, max),
+                value -> setting.set(value.floatValue()));
+    }
+    private static OptionInstance<Integer> perMinuteOption(String key, FloatSetting setting, int min, int max) {
+        return new OptionInstance<>(key,
+                OptionInstance.cachedConstantTooltip(Component.translatable(key + ".tooltip")),
+                (caption, value) -> Options.genericValueLabel(caption, Component.literal(value + " strikes/min")),
+                new OptionInstance.IntRange(min, max), Math.clamp(Math.round(setting.value()), min, max),
+                value -> setting.set(value.floatValue()));
+    }
+    private static OptionInstance<Integer> blocksOption(String key, FloatSetting setting, int min, int max) {
+        return new OptionInstance<>(key,
+                OptionInstance.cachedConstantTooltip(Component.translatable(key + ".tooltip")),
+                (caption, value) -> Options.genericValueLabel(caption, Component.literal(value + " blocks")),
+                new OptionInstance.IntRange(min, max), Math.clamp(Math.round(setting.value()), min, max),
+                value -> setting.set(value.floatValue()));
+    }
+    private static OptionInstance<Integer> scaleOption(String key, FloatSetting setting) {
+        return new OptionInstance<>(key,
+                OptionInstance.cachedConstantTooltip(Component.translatable(key + ".tooltip")),
+                (caption, value) -> Options.genericValueLabel(caption,
+                        Component.literal(String.format(Locale.ROOT, "%.2fx", value / 100.0f))),
+                new OptionInstance.IntRange(25, 200), Math.clamp(Math.round(setting.value() * 100.0f), 25, 200),
+                value -> setting.set(value / 100.0f));
+    }
+
     /**
      * Terrain streaming + BLAS rows. The three per-pass budgets are read by RtTerrain's scheduler
      * every pass, so a slider drag takes effect immediately; the BLAS flags are read at section
@@ -196,37 +292,21 @@ public final class RtVideoOptions {
     }
 
     /**
-     * The clouds sub-screen rows, which follow the selected style because the two styles generate
-     * their shapes in completely different ways:
-     *
-     * <ul>
-     *   <li><b>Volumetric</b> generates each cloud as a 3D formation, so it exposes the live coverage
-     *       field and the <b>Minimum</b>/<b>Maximum Cloud Thickness</b> pair (the actual vertical
-     *       extent of the generated formations, in blocks). The legacy 0..100% thickness slider is
-     *       hidden here — it no longer drives the volumetric geometry, and showing it would offer a
-     *       knob that does nothing.</li>
-     *   <li><b>Classic</b> extrudes vanilla's authored {@code clouds.png} cells, so coverage is baked
-     *       into the texture (the sub-screen swaps in {@link #cloudCoverageDisabledHint()}'s greyed-out
-     *       explanation) and the legacy thickness slider is what scales the authored box height.</li>
-     * </ul>
-     *
-     * {@code styleChanged} reopens the screen when the style flips, so the rows trade places
-     * immediately instead of a screen behind.
+     * The clouds sub-screen rows. {@code styleChanged} reopens the screen when the deck style flips,
+     * and the classic deck's coverage slider is left out entirely: coverage is baked into the flat
+     * texture in that style, so showing the row would offer a knob that changes nothing — the
+     * sub-screen replaces it with {@link #cloudCoverageDisabledHint()}'s greyed-out explanation.
+     * Volumetric reads the live coverage field, so the slider stays.
      */
     public static OptionInstance<?>[] cloudOptions(Runnable styleChanged) {
-        boolean classic = "classic".equals(CausticaConfig.Rt.Composite.CLOUD_STYLE.get());
         List<OptionInstance<?>> options = new ArrayList<>();
         options.add(clouds());
         options.add(cloudStyle(styleChanged));
-        if (!classic) {
+        if (!"classic".equals(CausticaConfig.Rt.Composite.CLOUD_STYLE.get())) {
             options.add(cloudCoverage());
-            options.add(cloudMinThickness());
-            options.add(cloudMaxThickness());
         }
         options.add(cloudHeight());
-        if (classic) {
-            options.add(cloudThickness());
-        }
+        options.add(cloudThickness());
         options.add(cloudShadowStrength());
         options.add(cloudOpacity());
         return options.toArray(OptionInstance<?>[]::new);
@@ -310,19 +390,6 @@ public final class RtVideoOptions {
             tonemapGamma(),
             tonemapSaturation(),
             tonemapContrast(),
-        };
-    }
-
-    /** Screen-space multi-scale HDR bloom options. */
-    public static OptionInstance<?>[] bloomOptions() {
-        return new OptionInstance<?>[] {
-            bloomEnabled(),
-            bloomQuality(),
-            bloomIntensity(),
-            bloomThreshold(),
-            bloomSoftKnee(),
-            bloomRadius(),
-            bloomColorInfluence(),
         };
     }
 
@@ -746,46 +813,6 @@ public final class RtVideoOptions {
                 CausticaConfig.Rt.Tonemapping.CONTRAST, 0, 300);
     }
 
-    private static final List<String> BLOOM_QUALITIES =
-            List.of("low", "medium", "high", "ultra");
-
-    private static OptionInstance<Boolean> bloomEnabled() {
-        return bool("caustica.options.rt.bloom", CausticaConfig.Rt.Bloom.ENABLED);
-    }
-
-    private static OptionInstance<String> bloomQuality() {
-        StringSetting setting = CausticaConfig.Rt.Bloom.QUALITY;
-        return new OptionInstance<>(
-            "caustica.options.rt.bloomQuality",
-            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.bloomQuality.tooltip")),
-            (caption, value) -> Component.translatable("caustica.options.rt.bloomQuality." + value),
-            new OptionInstance.Enum<>(BLOOM_QUALITIES, Codec.STRING),
-            BLOOM_QUALITIES.contains(setting.get()) ? setting.get() : "high",
-            setting::set);
-    }
-
-    private static OptionInstance<Integer> bloomIntensity() {
-        return percent("caustica.options.rt.bloomIntensity", CausticaConfig.Rt.Bloom.INTENSITY);
-    }
-
-    private static OptionInstance<Integer> bloomThreshold() {
-        return hundredths("caustica.options.rt.bloomThreshold",
-                CausticaConfig.Rt.Bloom.THRESHOLD, 0, 500);
-    }
-
-    private static OptionInstance<Integer> bloomSoftKnee() {
-        return percent("caustica.options.rt.bloomSoftKnee", CausticaConfig.Rt.Bloom.SOFT_KNEE);
-    }
-
-    private static OptionInstance<Integer> bloomRadius() {
-        return percent("caustica.options.rt.bloomRadius", CausticaConfig.Rt.Bloom.RADIUS);
-    }
-
-    private static OptionInstance<Integer> bloomColorInfluence() {
-        return percentRange("caustica.options.rt.bloomColorInfluence",
-                CausticaConfig.Rt.Bloom.COLOR_INFLUENCE, 0, 200);
-    }
-
     private static OptionInstance<Boolean> entities() {
         return bool("caustica.options.rt.entities", CausticaConfig.Rt.Entities.ENABLED);
     }
@@ -933,63 +960,14 @@ public final class RtVideoOptions {
     }
 
     /**
-     * Classic cloud thickness, as a percentage of the style's maximum box depth: 0% is the thinnest
-     * deck (still vanilla's own 4-block boxes) and 100% a deep bank you can fly into. Only the classic
-     * style reads it — the volumetric style's thickness is the Min/Max pair below.
+     * Cloud thickness, as a percentage of the maximum deck depth. Applies to both styles: 0% is a flat
+     * sheet, 100% is a deep bank you can fly into. Classic clouds become real boxes with lit tops and
+     * darker sides, the way vanilla's cloud geometry looks; volumetric clouds gain the depth their
+     * shading needs. Thicker clouds cost more to march.
      */
     private static OptionInstance<Integer> cloudThickness() {
         return percent("caustica.options.rt.cloudThickness",
                 CausticaConfig.Rt.Composite.CLOUD_THICKNESS);
-    }
-
-    /**
-     * Volumetric formation thickness sliders, in blocks.
-     *
-     * <p>Both rows share the 16..22 range and are independently adjustable; the pair is kept ordered by
-     * {@code CausticaConfig.Rt.Composite.setCloudMinThickness/setCloudMaxThickness}, which push the
-     * dependent value when a drag would cross it. The consumer writes through those methods rather than
-     * straight to the setting, so the invariant holds for every route into the config (slider, TOML,
-     * system property, reset).
-     *
-     * <p>The value shown is the real geometry: it is how many blocks of cloud a formation spans above
-     * its own base, which is what the ray march integrates and the light march shadows through.
-     */
-    private static OptionInstance<Integer> cloudMinThickness() {
-        return cloudThicknessBlocks("caustica.options.rt.cloudMinThickness",
-                CausticaConfig.Rt.Composite.CLOUD_MIN_THICKNESS, true);
-    }
-
-    private static OptionInstance<Integer> cloudMaxThickness() {
-        return cloudThicknessBlocks("caustica.options.rt.cloudMaxThickness",
-                CausticaConfig.Rt.Composite.CLOUD_MAX_THICKNESS, false);
-    }
-
-    private static OptionInstance<Integer> cloudThicknessBlocks(
-            String captionKey, IntSetting setting, boolean minimum) {
-        int lo = CausticaConfig.Rt.Composite.CLOUD_MIN_THICKNESS_BLOCKS;
-        int hi = CausticaConfig.Rt.Composite.CLOUD_MAX_THICKNESS_BLOCKS;
-        return new OptionInstance<>(
-            captionKey,
-            OptionInstance.cachedConstantTooltip(Component.translatable(captionKey + ".tooltip")),
-            // The label reads the CONFIG, not the option's own value. These two rows are coupled: the
-            // setter below pushes the other end of the pair when a drag would invert it, and that push
-            // happens in the config, not in the sibling OptionInstance. Showing the config value is
-            // what makes the pushed row's number update in the same frame, instead of displaying a
-            // stale value until the screen is reopened.
-            (caption, value) -> Options.genericValueLabel(caption,
-                    Component.translatable("caustica.options.rt.cloudThickness.blocks",
-                            minimum
-                                    ? CausticaConfig.Rt.Composite.cloudMinThicknessBlocks()
-                                    : CausticaConfig.Rt.Composite.cloudMaxThicknessBlocks())),
-            new OptionInstance.IntRange(lo, hi),
-            Math.clamp(setting.value(), lo, hi),
-            value -> {
-                if (minimum) {
-                    CausticaConfig.Rt.Composite.setCloudMinThickness(value);
-                } else {
-                    CausticaConfig.Rt.Composite.setCloudMaxThickness(value);
-                }
-            });
     }
 
     /**
@@ -1130,15 +1108,8 @@ public final class RtVideoOptions {
             position -> setting.set(DLSS_QUALITY_ORDER.get(position)));
     }
 
-    // The preset values and their meaning live next to the setting (CausticaConfig.Rt.DlssRr), so the
-    // slider and the config sanitizer can never disagree about which letters exist.
-    private static final List<Integer> DLSS_PRESET_ORDER = CausticaConfig.Rt.DlssRr.PRESET_VALUES;
+    private static final List<Integer> DLSS_PRESET_ORDER = List.of(0, 6);
 
-    /**
-     * The DLSS Ray Reconstruction model-preset slider. Changing it is a live operation: the setting is
-     * read every frame and {@code RtDlssRr.ensureFeature} recreates the RR feature (which carries its
-     * presets at creation time) when the value differs, resetting RR history once for the new model.
-     */
     private static OptionInstance<Integer> dlssPreset() {
         IntSetting setting = CausticaConfig.Rt.DlssRr.PRESET;
         int initialPreset = DLSS_PRESET_ORDER.contains(setting.value()) ? setting.value() : 0;
@@ -1479,18 +1450,12 @@ public final class RtVideoOptions {
     }
 
     private static OptionInstance<Integer> percent(String captionKey, FloatSetting setting) {
-        return percentRange(captionKey, setting, 0, 100);
-    }
-
-    private static OptionInstance<Integer> percentRange(
-            String captionKey, FloatSetting setting, int minPct, int maxPct
-    ) {
         return new OptionInstance<>(
             captionKey,
             OptionInstance.cachedConstantTooltip(Component.translatable(captionKey + ".tooltip")),
             (caption, value) -> Options.genericValueLabel(caption, Component.literal(value + "%")),
-            new OptionInstance.IntRange(minPct, maxPct),
-            Math.clamp(Math.round(setting.value() * 100.0f), minPct, maxPct),
+            new OptionInstance.IntRange(0, 100),
+            Math.clamp(Math.round(setting.value() * 100.0f), 0, 100),
             value -> setting.set(value / 100.0f));
     }
 

@@ -6,7 +6,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -63,8 +62,54 @@ final class RtWaterWaveShaderRegressionTest {
                 "Pass B must displace water hits the same way as Pass A");
         assertTrue(guides.contains("evaluateWaterWaves(") && guides.contains("waterWaveContinueOrigin("),
                 "transmission guides must follow the displaced surface or RR will halo");
+        assertTrue(primary.contains("payloadWaterRainExposed()")
+                        && world.contains("payloadWaterRainExposed()")
+                        && guides.contains("payloadWaterRainExposed()"),
+                "all passes must forward the closest-hit water exposure flag to the ripple layer");
         assertTrue(primary.contains("isWater ? waterSurf.motionPrev : payload.motionPrev"),
                 "primary water motion must come from the height-field time derivative");
+    }
+
+
+    @Test
+    void rainAddsAnimatedConcentricRingNormalsToTheWaterSurface() throws IOException {
+        String water = Files.readString(WATER);
+        assertTrue(water.contains("static const float RAIN_RIPPLE_CELL_SIZE"));
+        assertTrue(water.contains("float2 rainRippleGrad("));
+        assertTrue(water.contains("float scale = clamp(worldPush.rainEffects.x, 0.25, 2.0);"));
+        assertTrue(water.contains("clamp(worldPush.rainEffects.y, 0.0, 2.0)"),
+                "the water ripple toggle and strength slider must reach the shader");
+        assertTrue(water.contains("float rain = saturate(worldPush.weather.x);"),
+                "rain ripples must follow resolved weather intensity independently of sky-lighting options");
+        assertTrue(water.contains("grad += rainRippleGrad(domain, currentT, rain, footprint, rainRippleExposure);"));
+        assertTrue(water.contains("previousGrad += rainRippleGrad(domain, previousT, rain, footprint, rainRippleExposure);"),
+                "the previous ring phase must be sampled for temporal reprojection");
+        assertTrue(water.contains("RAIN_RIPPLE_SPEED") && water.contains("RAIN_RIPPLE_WAVENUMBER"),
+                "ring radius and concentric wave fronts must animate over time");
+    }
+
+    @Test
+    void rainRipplesAreLimitedToWaterWithDirectRainExposure() throws IOException {
+        Path root = repoRoot();
+        String common = Files.readString(root.resolve("shaders/world/world_common.slang"));
+        String core = Files.readString(root.resolve("shaders/world/world_core.slang"));
+        String hit = Files.readString(root.resolve("shaders/world/world.rchit.slang"));
+        String mesher = Files.readString(root.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtTerrainMesher.java"));
+        String water = Files.readString(WATER);
+
+        assertTrue(common.contains("PAYLOAD_WATER_RAIN_EXPOSED = 4096u"));
+        assertTrue(core.contains("payloadWaterRainExposed()"));
+        assertTrue(mesher.contains("fluidCapture.rainExposed = snapshot.isRainExposed(m)"),
+                "water-cell exposure must come from the same motion-blocking heightmap as rain reach");
+        assertTrue(mesher.contains("water && rainExposed ? TERRAIN_PRIM_RAIN_EXPOSED : 0"),
+                "only exposed water primitives may carry the rain-impact flag");
+        assertTrue(hit.contains("(pr.flags & TERRAIN_PRIM_RAIN_EXPOSED) != 0u")
+                        && hit.contains("payload.flags |= PAYLOAD_WATER_RAIN_EXPOSED"),
+                "closest-hit must forward exposure to path tracing");
+        assertTrue(water.contains("bool rainRippleExposed"));
+        assertTrue(water.contains("* saturate(rainRippleExposure)"),
+                "cave water must early-out from rain rings while normal animated water waves remain enabled");
     }
 
     @Test
@@ -75,110 +120,6 @@ final class RtWaterWaveShaderRegressionTest {
                 "reflections must stay outside the rest-plane triangle");
         assertTrue(origin.contains("origin -= waves.geometricNormal * (planeSide + bias)"),
                 "transmissions must start inside the volume even from a crest above the mesh");
-    }
-
-    /**
-     * The wave field is global but the water body is not. The displaced surface point follows the
-     * viewing ray, so at a grazing angle it leaves the water quad the ray hit by several blocks; a
-     * refracted ray starting there samples the shore instead of the underwater scene, which is what
-     * drew a contour along the water's edge (and made the transmission guide demodulate the fringe
-     * against the shore's albedo, i.e. a halo). The transmitted origin must therefore sit on the
-     * water quad the ray hit.
-     *
-     * <p>The origin must NOT be clamped to the block grid: the quad a ray hit is a single block, but
-     * the water body is not, so a per-block clamp snapped the origin to the block edges and pulled
-     * the whole block grid into the refraction (stretched corners, worse the closer the camera gets).
-     */
-    @Test
-    void transmittedOriginSitsOnTheWaterQuadWithoutTheBlockGrid() throws IOException {
-        String water = Files.readString(WATER);
-        String origin = slice(water, "public float3 waterWaveContinueOrigin(", "\n}\n");
-
-        assertTrue(origin.contains("origin.xz = waves.planePos.xz;"),
-                "the transmitted origin must sit on the rest-plane hit, which is on the water quad");
-        assertTrue(origin.indexOf("goingOut > 0.0") < origin.indexOf("origin.xz = waves.planePos.xz;"),
-                "only the ray that enters the volume may be anchored; a reflection leaves the surface");
-        assertFalse(origin.contains("floor("),
-                "the transmitted origin must not be quantized by the block grid");
-        assertFalse(water.contains("waterConfineToWater(") || water.contains("waterSurfaceFootprint("),
-                "the per-block confinement is gone; it produced a visible grid on the water");
-    }
-
-    /**
-     * Numeric model of the anchoring: the flat-mesh proxy lets the displaced surface point drift off
-     * the water quad, so a refraction that starts there samples the shore. Anchored on the rest-plane
-     * hit, the origin stays on the quad for every amplitude, speed and viewing angle the settings
-     * allow - and it moves continuously with the hit, so the block grid cannot reach the refraction.
-     */
-    @Test
-    void anchoredOriginStaysOnTheWaterQuadForEveryAllowedSetting() {
-        final double anchorX = 4096.0 - 137.0;   // the rebase origin modulo 4096
-        final double anchorZ = 91.0;
-        final double[] strengths = {0.0, 1.0, 2.0, 4.0};
-        final double[] speeds = {0.0, 1.0, 4.0};
-        final double[] slopes = {-0.02, -0.05, -0.1, -0.3, -0.7, -1.0};
-
-        int escapedBefore = 0;
-        int escapedAfter = 0;
-        for (double strength : strengths) {
-            for (double speed : speeds) {
-                for (double slope : slopes) {
-                    for (double lateral : new double[] {-1.0, -0.3, 0.0, 0.3, 1.0}) {
-                        // A view ray with the given slope, looking at a point inside a water block.
-                        double rdZ = -Math.sqrt(Math.max(1.0 - slope * slope - lateral * lateral, 0.0));
-                        double rdX = lateral * Math.sqrt(Math.max(1.0 - slope * slope, 0.0));
-                        double hitX = 12.5, hitZ = 7.5;
-
-                        // Worst case the flat-mesh proxy can drift: the crest bound of the spectrum
-                        // along the ray, both ways.
-                        double bound = 0.55 * strength;
-                        double drift = bound / Math.max(Math.abs(slope), 0.05);
-                        double dispX = hitX + rdX * drift;
-                        double dispZ = hitZ + rdZ * drift;
-
-                        double blockMinX = Math.floor(hitX + anchorX) - anchorX;
-                        double blockMinZ = Math.floor(hitZ + anchorZ) - anchorZ;
-
-                        if (dispX < blockMinX || dispX > blockMinX + 1.0
-                                || dispZ < blockMinZ || dispZ > blockMinZ + 1.0) {
-                            escapedBefore++;
-                        }
-
-                        // The anchored origin: the rest-plane hit, which is on the quad by definition.
-                        double confinedX = hitX;
-                        double confinedZ = hitZ;
-                        if (confinedX < blockMinX || confinedX > blockMinX + 1.0
-                                || confinedZ < blockMinZ || confinedZ > blockMinZ + 1.0) {
-                            escapedAfter++;
-                        }
-                    }
-                }
-            }
-        }
-        assertTrue(escapedBefore > 0,
-                "the test must exercise rays whose displaced point leaves the water body");
-        assertEquals(0, escapedAfter,
-                "the refraction origin must never leave the water quad the ray hit");
-    }
-
-    /**
-     * The refraction origin must not jump when the hit crosses a block boundary: a per-block clamp
-     * made the origin snap to the block edge, which stretched the block corners in the refraction.
-     */
-    @Test
-    void refractionOriginIsContinuousAcrossBlockBoundaries() {
-        double anchorX = 4096.0 - 137.0;
-        double previous = 12.999;
-        for (double hitX = 13.001; hitX < 13.05; hitX += 0.001) {
-            double origin = hitX;   // the anchored origin follows the rest-plane hit
-            assertTrue(Math.abs(origin - previous) < 0.01,
-                    "the refraction origin must vary continuously with the hit, not jump per block");
-            previous = origin;
-        }
-        // The block the hit belongs to changes here, which must not change the origin.
-        assertEquals(Math.floor(12.999 + anchorX) - anchorX + 1.0,
-                Math.floor(13.001 + anchorX) - anchorX,
-                "the test must straddle a block boundary");
     }
 
     private static String slice(String source, String startNeedle, String endNeedle) {

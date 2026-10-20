@@ -75,7 +75,6 @@ public class RtVideoOptionsScreen extends OptionsSubScreen {
         list.addHeader(DISPLAY_HEADER);
         list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.exposureHeader", RtSubScreens::exposure));
         list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.tonemapHeader", RtSubScreens::tonemap));
-        list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.bloomHeader", RtSubScreens::bloom));
         list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.hdrHeader", RtSubScreens::hdr));
 
         // --- World ---
@@ -87,6 +86,13 @@ public class RtVideoOptionsScreen extends OptionsSubScreen {
         list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.pomHeader", RtSubScreens::pom));
         list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.cloudsHeader", RtSubScreens::clouds));
         list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.fogHeader", RtSubScreens::fog));
+        list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.wetnessHeader", RtSubScreens::wetness));
+        list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.waterRainRipplesHeader", RtSubScreens::rainOptics));
+        list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.rainRefractionHeader", RtSubScreens::rainRefraction));
+        list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.underwaterHazeHeader", RtSubScreens::underwater));
+        list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.underwaterSkyHeader", RtSubScreens::underwaterSky));
+        list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.rainCloudsHeader", RtSubScreens::rainClouds));
+        list.addBig(RtSubScreens.openButton(this, "caustica.options.rt.lightningHeader", RtSubScreens::lightning));
 
         // --- Advanced ---
         list.addHeader(ADVANCED_HEADER);

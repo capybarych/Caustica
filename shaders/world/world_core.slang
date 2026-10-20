@@ -46,6 +46,7 @@ public uint payloadMaterial() { return payload.flags & PAYLOAD_MATERIAL_MASK; }
 // Set by world.rchit on any dielectric hit (see PAYLOAD_DIELECTRIC_ENTERING) — whether the ray was
 // travelling into the volume (vs. out of it) at this hit's face.
 public bool payloadDielectricEntering() { return (payload.flags & PAYLOAD_DIELECTRIC_ENTERING) != 0u; }
+public bool payloadWaterRainExposed() { return (payload.flags & PAYLOAD_WATER_RAIN_EXPOSED) != 0u; }
 public bool payloadEmitterInList() { return (payload.flags & PAYLOAD_EMITTER_IN_LIST) != 0u; }
 public bool payloadDynamicEntity() { return (payload.flags & PAYLOAD_DYNAMIC_ENTITY) != 0u; }
 // LINEAR roughness, i.e. GGX alpha directly — NOT perceptual roughness. This is the one convention used
@@ -85,12 +86,6 @@ public bool restirEnabled() {
 public bool waterWavesEnabled() { return worldFlag(worldPush, WORLD_FLAG_WAVES); }
 public bool sharcEnabled() { return worldFeature(worldPush, FEATURE_SHARC); }
 public bool cameraSubmerged() { return worldFlag(worldPush, WORLD_FLAG_SUBMERGED); }
-/**
- * True when the host published the blue-noise dither tile (WorldPush.blueNoiseAddr). Its absence is
- * a hard fallback rather than a quality knob: every consumer keeps the PCG draw it always used, so a
- * missing tile can never leave a sample direction undefined.
- */
-public bool blueNoiseEnabled() { return worldPush.blueNoiseAddr != 0; }
 
 /** SSS strength after the player toggle: the material value, or a hard zero when SSS is disabled. */
 public float payloadActiveSss() { return sssEnabled() ? payloadSss() : 0.0; }

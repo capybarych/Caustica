@@ -2,15 +2,15 @@ package dev.comfyfluffy.caustica.rt;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.renderpearl.api.textures.GpuTexture;
-import com.mojang.renderpearl.api.textures.GpuTextureView;
-import com.mojang.renderpearl.backend.vulkan.VulkanCommandEncoder;
-import com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture;
-import com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView;
-import com.mojang.renderpearl.frontend.FrontendCommandEncoder;
+import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
+import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
+import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
 import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.client.CausticaJitter;
+import dev.comfyfluffy.caustica.mixin.CommandEncoderAccessor;
 import dev.comfyfluffy.caustica.rt.gen.RestirReservoirData;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushConstantsData;
 import dev.comfyfluffy.caustica.rt.terrain.RtDistantHorizonsTerrain;
@@ -31,6 +31,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.data.AtlasIds;
 import net.minecraft.resources.Identifier;
 import net.minecraft.tags.FluidTags;
+import net.minecraft.util.ARGB;
 import net.minecraft.util.Mth;
 import net.minecraft.world.attribute.EnvironmentAttributes;
 import net.minecraft.world.item.BlockItem;
@@ -41,8 +42,6 @@ import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
-import org.joml.Vector3fc;
-import org.joml.Vector4fc;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.KHRSynchronization2;
@@ -64,7 +63,6 @@ import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
-import dev.comfyfluffy.caustica.rt.pipeline.RtBloomPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
@@ -106,6 +104,8 @@ import java.nio.LongBuffer;
  */
 public final class RtComposite {
     public static final RtComposite INSTANCE = new RtComposite();
+    private static final RtSurfaceWetness SURFACE_WETNESS = new RtSurfaceWetness();
+    private static final RtLightning LIGHTNING = new RtLightning();
 
     public static boolean enabled() {
         return CausticaConfig.Rt.ENABLED.value();
@@ -122,11 +122,7 @@ public final class RtComposite {
     // riding the same ring slot, addressed from WorldPush.cloudCellsAddr exactly like the ready mask
     // above is addressed from the push constants — no extra binding, one flush covers all three.
     private static final int CLOUD_CELLS_OFFSET = (READY_MASK_OFFSET + READY_MASK_CAPACITY + 15) & ~15;
-    // The blue-noise dither tile (RtBlueNoise) rides the same slot, addressed from
-    // WorldPush.blueNoiseAddr. Unlike the per-frame regions above it, the tile is static for the whole
-    // session, so it is written and flushed once when each ring slot is created.
-    private static final int BLUE_NOISE_OFFSET = (CLOUD_CELLS_OFFSET + RtCloudCells.MAP_BYTES + 15) & ~15;
-    private static final int WORLD_PUSH_BUFFER_SIZE = BLUE_NOISE_OFFSET + RtBlueNoise.BYTES;
+    private static final int WORLD_PUSH_BUFFER_SIZE = CLOUD_CELLS_OFFSET + RtCloudCells.MAP_BYTES;
     // Real inline push constants (fast constant-bank reads), separate from the WorldPush BDA ring above.
     // Hot addresses/frameIndex and raygen's debugView avoid unnecessary global-memory dereferences;
     // WorldPushConstantsData is generated from the same Slang module and owns this second ABI as well.
@@ -150,6 +146,17 @@ public final class RtComposite {
 
     private static boolean waterWaves() {
         return CausticaConfig.Rt.Composite.WATER_WAVES.value();
+    }
+
+    private static float surfaceWetnessForFrame(boolean raining) {
+        long now = System.nanoTime();
+        if (!CausticaConfig.Rt.Composite.WETNESS_ENABLED.value()) {
+            SURFACE_WETNESS.reset(now);
+            return 0.0f;
+        }
+        return SURFACE_WETNESS.update(raining, now,
+                CausticaConfig.Rt.Composite.WETNESS_WET_SECONDS.value(),
+                CausticaConfig.Rt.Composite.WETNESS_DRY_SECONDS.value());
     }
 
     /**
@@ -218,11 +225,11 @@ public final class RtComposite {
             Minecraft mc = Minecraft.getInstance();
             if (mc != null && mc.gameRenderer != null) {
                 float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
-                Vector3fc fog = mc.gameRenderer.mainCamera().attributeProbe()
+                int argb = mc.gameRenderer.mainCamera().attributeProbe()
                         .getValue(EnvironmentAttributes.FOG_COLOR, partial);
-                r = srgbToLinear(fog.x());
-                g = srgbToLinear(fog.y());
-                b = srgbToLinear(fog.z());
+                r = srgb8ToLinear(ARGB.red(argb));
+                g = srgb8ToLinear(ARGB.green(argb));
+                b = srgb8ToLinear(ARGB.blue(argb));
             }
         } catch (Throwable ignored) {
             // Probe unavailable (early boot / unsupported context): strength 0 keeps the neutral tint.
@@ -443,47 +450,37 @@ public final class RtComposite {
     private static final float NRD_DENOISING_RANGE = 500000.0f;
     // ---- Cloud deck. These mirror clouds.slang and must stay in lock-step with it.
     //
-    // The volumetric field samples its noise in several different spaces (the weather, formation, warp,
-    // shape, lobe and detail octaves — see the frequency ladder in clouds.slang). Each of those lattices
-    // repeats every CLOUD_PERIOD_CELLS (1024) cells of ITS OWN space, so the shared period is the
-    // coarsest one: the weather field at CLOUD_WEATHER_DIV (16) cells:
+    // The classic field repeats every CLOUD_CELL_BLOCKS * CLOUD_PERIOD_CELLS = 12 * 512 = 6144 blocks,
+    // but the VOLUMETRIC field samples the same hash at CLOUD_VOLUMETRIC_SCALE (0.5), so in its own
+    // sampled space 6144 blocks is only half a period. Wrapping the anchor there landed mid-period and
+    // snapped the entire cloudscape to a different pattern — clouds visibly changing shape while
+    // walking, in the volumetric style only.
     //
-    //     period = 1024 cells * 12 blocks/cell * 16 = 196608 blocks
+    // The wrap must therefore be a whole period in EVERY space the field is sampled in: the base
+    // octaves, the domain warp, and both billow layers. The binding constraint is the largest octave
+    // divisor (CLOUD_WARP_DIV = 2.0 in clouds.slang):
     //
-    // Every divisor is a power of two, so all of these multiplies are exact in binary floating point and
-    // the wrap identity holds bit-for-bit rather than approximately. 196608 is also an exact multiple of
-    // the classic authored map's own 3072-block period (64x), so the classic deck keeps wrapping
-    // cleanly through the same anchor. Wrapping at anything that is not a whole period would snap the
-    // whole cloudscape to a different pattern as the wind scroll crossed the boundary.
-    private static final double CLOUD_FIELD_PERIOD_BLOCKS = 1024.0 * 12.0 * 16.0;
+    //     period = 512 cells * 12 blocks/cell * maxDivisor(2.0) / scale(0.5) = 24576 blocks
+    //
+    // Every divisor there is a power of two, so all of these multiplies are exact in binary floating
+    // point and the wrap identity holds bit-for-bit rather than approximately. Verified: the full
+    // density function (base octaves + warp + billow) is now identical across a wrap to 0.0.
+    private static final double CLOUD_FIELD_PERIOD_BLOCKS = 512.0 * 12.0 * 2.0 / 0.5;
     // Vanilla's clouds drift at 0.03 blocks/tick; matched so the sky moves at a familiar speed.
     private static final double CLOUD_WIND_BLOCKS_PER_TICK = 0.03;
-    // Classic deck depth at the thickness slider's 100%. The classic style still extrudes vanilla's
-    // authored cell boxes, so this is the box height the slider scales from the 4-block floor below.
-    // The volumetric style does NOT use it: its formations are generated and their vertical extent is
-    // the Min/Max Cloud Thickness pair, in blocks, straight from the sliders.
-    private static final float CLOUD_CLASSIC_MAX_THICKNESS_BLOCKS = 110.0f;
+    // Deck thickness at the slider's 100%. Both styles march a real slab now, so this is the depth the
+    // clouds actually have in the world: at full thickness a bank is tall enough to fly into, while the
+    // slider at 0 collapses the deck to the old flat plane.
+    // Real cumulus is as tall as it is wide, often taller — a bank whose base sits at cloud height can
+    // easily tower 100+ blocks. 40 was too shallow for the deck to ever read as heaped rather than
+    // layered, and since extinction is now normalised by the slab depth (CLOUD_REFERENCE_THICKNESS in
+    // clouds.slang) raising this adds VOLUME without making the clouds more opaque.
+    private static final float CLOUD_MAX_THICKNESS_BLOCKS = 110.0f;
     // Classic boxes never get thinner than vanilla's own 4-block extrusion (CloudRenderer's
     // putVec3(12, 4, 12)): the thickness slider scales the box HEIGHT from that baseline up, per the
-    // classic rework's "vanilla shapes, slider-driven depth" decision.
+    // classic rework's "vanilla shapes, slider-driven depth" decision. Volumetric keeps the full
+    // 0..110 range, including the flat-sheet collapse at zero.
     private static final float CLOUD_CLASSIC_MIN_THICKNESS = 4.0f;
-    // Extra slab headroom above the thickest formation, matching CLOUD_BASE_JITTER_BLOCKS in
-    // clouds.slang: each formation may sit up to this far above the deck's base plane, so the bounding
-    // slab the march integrates through has to cover that offset as well as the formation itself.
-    private static final float CLOUD_BASE_JITTER_BLOCKS = 4.0f;
-    // Internal churn speed of the 3D density field and its wrap period, mirroring
-    // CLOUD_MORPH_PERIOD_BLOCKS in clouds.slang. The period is a whole period of every Y lattice the
-    // offset displaces (the common multiple of the shape and detail bands' 12288-block Y period and the
-    // lobe band's 8192-block one), so the wrap is seamless rather than a snap; at this speed that is
-    // ~45 hours of world time, so the loop is never actually observed.
-    //
-    // The speed itself is a compromise measured against the field: the offset slides the noise through
-    // Y, and a formation is only 16..22 blocks tall, so too high a rate re-rolls a cloud's silhouette
-    // while the player watches ("boiling"). 0.15 blocks/s keeps ~97% of a cloud's volume in place one
-    // second later and ~84% after five, i.e. it visibly billows over tens of seconds rather than
-    // flickering. Wind drift (0.03 blocks/tick, ~0.6 blocks/s) remains the dominant motion.
-    private static final double CLOUD_MORPH_BLOCKS_PER_SECOND = 0.15;
-    private static final double CLOUD_MORPH_PERIOD_BLOCKS = 24576.0;
     // Vanilla offsets the deck half a cell minus a sliver in Z (CloudRenderer.render: cameraZ + 3.96),
     // so the camera sits asymmetrically inside the cell grid. Matched for shape-parity with vanilla;
     // the x offset is the wind scroll itself.
@@ -563,7 +560,6 @@ public final class RtComposite {
     private PushSlot[] pushRing;
     private int pushSlot;
     private RtDisplayPipeline displayPipeline;
-    private RtBloomPipeline bloomPipeline;
     private RtImage output;
     // Packed primary -> indirect continuations. Pass A is fixed at one sample and owns two records per
     // render pixel (base + optional transmission); Pass B resamples them at the configured SPP.
@@ -910,8 +906,8 @@ public final class RtComposite {
         if (ctx == null) {
             throw new IllegalStateException("RT context disappeared before graphics use completed");
         }
-        var encoder = (VulkanCommandEncoder) ((FrontendCommandEncoder) RenderSystem.getDevice()
-                .createCommandEncoder()).backend();
+        var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice()
+                .createCommandEncoder()).caustica$getBackend();
         ctx.gpuExecutor().endGraphicsUse(encoder, graphicsUse);
         pendingGraphicsUse = null;
     }
@@ -953,9 +949,6 @@ public final class RtComposite {
             if (displayPipeline == null) {
                 displayPipeline = RtDisplayPipeline.create(ctx);
             }
-            if (bloomPipeline == null) {
-                bloomPipeline = RtBloomPipeline.create(ctx);
-            }
             // A resource reload re-stitches the block atlas. We've already torn down the world pipeline
             // (onResourceReloadStart) so nothing references the old atlas, but MC's deferred free keeps the
             // old view handle live for a few frames, then swaps in the new atlas (whose GPU upload may lag,
@@ -973,9 +966,6 @@ public final class RtComposite {
             // manual -> auto at runtime (video settings), the auto-mode histogram/state/pipeline must be
             // allocated before recordFrame's exposure.record() below needs them, or it throws.
             exposure.ensureResources(ctx);
-            if (CausticaConfig.Rt.Bloom.ENABLED.value() && CausticaConfig.Rt.Bloom.INTENSITY.value() > 0.0f) {
-                bloomPipeline.ensureSize(width, height);
-            }
             refreshPipelineShapeIfNeeded(ctx);
             RtPipeline active = ensureWorld(ctx);
             if (materialEpochTraceGate) {
@@ -1034,10 +1024,8 @@ public final class RtComposite {
             if (pushRing == null) {
                 pushRing = new PushSlot[PUSH_RING];
                 for (int i = 0; i < PUSH_RING; i++) {
-                    PushSlot slot = new PushSlot(ctx.createBuffer(WORLD_PUSH_BUFFER_SIZE,
+                    pushRing[i] = new PushSlot(ctx.createBuffer(WORLD_PUSH_BUFFER_SIZE,
                             VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, "rt world push " + i));
-                    writeBlueNoise(slot.buffer);
-                    pushRing[i] = slot;
                 }
             }
             if (output != null) {
@@ -1101,18 +1089,6 @@ public final class RtComposite {
         // incrementally displaying old UVs/IDs against the new atlas/table.
         RtTerrain.requestFullClear();
         materialEpochTraceGate = true;
-    }
-
-    /**
-     * Copy the static blue-noise tile into one BDA ring slot and flush it once. The shader addresses
-     * it through {@code WorldPush.blueNoiseAddr}; every slot gets the same tile because frames rotate
-     * through them without tracking which slot already received it.
-     */
-    private static void writeBlueNoise(RtBuffer buffer) {
-        ByteBuffer tile = MemoryUtil.memByteBuffer(buffer.mapped + BLUE_NOISE_OFFSET, RtBlueNoise.BYTES)
-                .order(ByteOrder.nativeOrder());
-        tile.asIntBuffer().put(RtBlueNoise.INSTANCE.words(), 0, RtBlueNoise.WORDS);
-        buffer.flush(BLUE_NOISE_OFFSET, RtBlueNoise.BYTES);
     }
 
     private void refreshMaterialBindingsIfNeeded(RtContext ctx) {
@@ -1371,6 +1347,23 @@ public final class RtComposite {
             syncRestirResources(ctx);
             return;
         }
+
+        // Query RR's preferred render dimensions only when targets need rebuilding, not every frame.
+        // A missing shim/SDK or unsupported driver turns RR off and falls back to the built-in tracer.
+        int[] rrOptimal = null;
+        if (rrEnabled) {
+            rrOptimal = RtDlssRr.INSTANCE.queryOptimalRenderSize(width, height);
+            if (rrOptimal == null || !RtDlssRr.enabled()) {
+                rrEnabled = false;
+                rrQuality = Integer.MIN_VALUE;
+                fsrEnabled = RtFsrUpscaler.enabled();
+                fsrQuality = fsrEnabled ? RtFsrUpscaler.quality() : Integer.MIN_VALUE;
+                xessEnabled = !fsrEnabled && RtXessUpscaler.enabled();
+                xessQuality = xessEnabled ? RtXessUpscaler.quality() : Integer.MIN_VALUE;
+                nrdEnabled = RtNrdDenoiser.active();
+                svgfEnabled = !nrdEnabled && CausticaConfig.Rt.Denoise.ENABLED.value();
+            }
+        }
         ctx.waitIdle(); // resize is rare; no in-flight frame may use the old image/descriptor
         // Reaching here with RR off can mean the denoising filter was just turned off. Nothing calls
         // ensureFeature again in that state, so the RR feature (and its history buffers) would stay
@@ -1407,7 +1400,7 @@ public final class RtComposite {
         // of truth for what its dispatch will accept.
         int[] optimal;
         if (rrEnabled) {
-            optimal = RtDlssRr.INSTANCE.queryOptimalRenderSize(width, height);
+            optimal = rrOptimal;
         } else if (fsrEnabled) {
             optimal = RtFsrUpscaler.INSTANCE.queryRenderSize(width, height);
         } else if (xessEnabled) {
@@ -1505,12 +1498,6 @@ public final class RtComposite {
         // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
         rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
         exposure.ensureResources(ctx);
-        if (bloomPipeline != null) {
-            bloomPipeline.invalidateBindings();
-            if (CausticaConfig.Rt.Bloom.ENABLED.value() && CausticaConfig.Rt.Bloom.INTENSITY.value() > 0.0f) {
-                bloomPipeline.ensureSize(width, height);
-            }
-        }
 
         mvHasPrev = false; // recreated images -> first MV frame is zero
         waterWaveTimeValid = false;
@@ -1548,7 +1535,7 @@ public final class RtComposite {
 
     private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor) {
         long dstImage = vkImage(nativeColor);
-        var encoder = (VulkanCommandEncoder) ((FrontendCommandEncoder) RenderSystem.getDevice().createCommandEncoder()).backend();
+        var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).caustica$getBackend();
         RtGpuExecutor gpuExecutor = ctx.gpuExecutor();
         // Reserve the graphics-use value that guards this frame's reusable TLAS and entity resources.
         RtGpuExecutor.GraphicsUse graphicsUse = gpuExecutor.beginGraphicsUse(encoder);
@@ -1715,9 +1702,15 @@ public final class RtComposite {
             // Dimension + weather drive the sky model and the celestial light, so both are resolved
             // together, once, from the same level and partial tick.
             int dimension = dimensionId(level);
-            WeatherState weather = weatherState(level,
-                    Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false));
+            float partialTick = Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false);
+            WeatherState weather = weatherState(level, partialTick);
             SkyPush sky = skyPush(dimension, weather);
+            RtLightning.State lightning = LIGHTNING.update(level, camX, camY, camZ, weather.rain(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_ENABLED.value(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE.value(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_INTENSITY.value(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_SOUND_ENABLED.value(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_SOUND_VOLUME.value(), System.nanoTime());
             // Two lanes, resolved together from the same weather + camera state the sky above used.
             CloudPush clouds = cloudState(dimension, weather, camY);
             // Analytic held-item light: position + intensity lane and the item's RGB tint; w == 0
@@ -1764,11 +1757,7 @@ public final class RtComposite {
                     clouds.clouds(),
                     clouds.anchor(),
                     clouds.color(),
-                    clouds.shape(),
                     cloudCellsAddress,
-                    // Static blue-noise dither tile (WorldPush.blueNoiseAddr) — written once per ring
-                    // slot in writeBlueNoise, only the address travels per frame.
-                    pushBuf.deviceAddress + BLUE_NOISE_OFFSET,
                     // Shader-only POM: x relief depth (blocks), y max texel crossings, w fade distance.
                     parallaxParams(),
                     dimension,
@@ -1805,7 +1794,34 @@ public final class RtComposite {
                     fogParams(),
                     // Biome/weather tint for the fog's scatter (WorldPush.fogTint): the game's
                     // own FOG_COLOR attribute, blended by the slider — see fogTint() above.
-                    fogTint()
+                    fogTint(),
+                    // Live rain material state. Disabling wetness clears it instead of leaving a stale
+                    // wet ground value to reappear if the option is toggled back on.
+                    new Float4(surfaceWetnessForFrame(level != null && level.getRainLevel(partialTick) > 0.001f),
+                            CausticaConfig.Rt.Composite.WETNESS_GLOSS.value(),
+                            CausticaConfig.Rt.Composite.GROUND_RAIN_RIPPLES.value()
+                                    ? CausticaConfig.Rt.Composite.GROUND_RIPPLE_STRENGTH.value() : 0.0f,
+                            CausticaConfig.Rt.Composite.WETNESS_TRANSITION_DISTANCE.value()),
+                    // x shrinks/enlarges procedural water rings; y disables/scales their amplitude;
+                    // z scales rain-lens ray bending; w limits the amount of weather fill clouds may add.
+                    new Float4(CausticaConfig.Rt.Composite.WATER_RIPPLE_SCALE.value(),
+                            CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES.value()
+                                    ? CausticaConfig.Rt.Composite.WATER_RIPPLE_STRENGTH.value() : 0.0f,
+                            CausticaConfig.Rt.Composite.RAIN_REFRACTION_ENABLED.value()
+                                    ? CausticaConfig.Rt.Composite.RAIN_REFRACTION_STRENGTH.value() : 0.0f,
+                            CausticaConfig.Rt.Composite.RAIN_CLOUD_RESPONSE.value()
+                                    ? CausticaConfig.Rt.Composite.RAIN_CLOUD_DENSITY.value() : 0.0f),
+                    // Underwater options remain active independent of sky/weather-lighting settings.
+                    new Float4(CausticaConfig.Rt.Composite.UNDERWATER_HAZE_ENABLED.value()
+                                    ? CausticaConfig.Rt.Composite.UNDERWATER_HAZE_STRENGTH.value() : 0.0f,
+                            CausticaConfig.Rt.Composite.UNDERWATER_BLUE_TINT.value(),
+                            0.0f, // reserved: haze source attenuation no longer depends on a guessed local surface height
+                            CausticaConfig.Rt.Composite.UNDERWATER_SKY_ENABLED.value()
+                                    ? CausticaConfig.Rt.Composite.UNDERWATER_SKY_DISTANCE.value() : 0.0f),
+                    // Lightning's final WorldPush lane is generated from world_common.slang reflection.
+                    new Float4((float) (lightning.x() - terrain.blockX),
+                            (float) (lightning.y() - terrain.blockY),
+                            (float) (lightning.z() - terrain.blockZ), lightning.intensity())
             ).write(push);
             int flushBytes = Math.max(WORLD_PUSH_SIZE, READY_MASK_OFFSET + readyMaskBytes);
             if (cloudCellsAddress != 0L) {
@@ -2138,20 +2154,7 @@ public final class RtComposite {
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.exposure")) {
                 exposure.record(ctx, cmd, stack, rrOutput);
             }
-            VulkanCommandEncoder.memoryBarrier(cmd, stack); // exposure image visible to bloom and display mapper
-
-            // Screen-space multi-scale HDR bloom. Evaluates highlight extraction in exposure-referenced
-            // linear space after exposure metering (so bloom never feeds back into auto-exposure) and
-            // composites back into rrOutput before display tone mapping (so both SDR and HDR10 PQ
-            // outputs receive the tone-mapped bloom). Bypassed for debug views and when disabled.
-            if (debugView == 0 && bloomPipeline != null
-                    && CausticaConfig.Rt.Bloom.ENABLED.value()
-                    && CausticaConfig.Rt.Bloom.INTENSITY.value() > 0.0f) {
-                try (RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.bloom")) {
-                    bloomPipeline.record(cmd, stack, rrOutput, exposure.image());
-                }
-                VulkanCommandEncoder.memoryBarrier(cmd, stack);
-            }
+            VulkanCommandEncoder.memoryBarrier(cmd, stack); // exposure image visible to the display mapper
 
             try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
@@ -2247,21 +2250,19 @@ public final class RtComposite {
     }
 
     /**
-     * The four {@code WorldPush} cloud lanes, resolved together by {@link #cloudState} so a caller
-     * cannot push a deck's parameters with a mismatched anchor, thickness range or weather fill.
+     * The three {@code WorldPush} cloud lanes, resolved together by {@link #cloudState} so a caller
+     * cannot push a deck's parameters with a mismatched anchor or a mismatched weather fill.
      *
      * @param clouds x player coverage (the slider — the shader folds the weather in itself), y opacity,
      *               z shadow strength, w camera-relative deck height
      * @param anchor xy wrapped sample anchor, z slab thickness, w view limit
      * @param color  xyz vanilla CLOUD_COLOR in linear space, w weather overcast fill 0..1
-     * @param shape  x minimum formation thickness (blocks), y maximum formation thickness (blocks),
-     *               z shape-evolution time (seconds), w reserved
      */
-    private record CloudPush(Float4 clouds, Float4 anchor, Float4 color, Float4 shape) {
+    private record CloudPush(Float4 clouds, Float4 anchor, Float4 color) {
         /** No deck at all: a zeroed coverage/opacity pair short-circuits every cloud path in the shader. */
         static final CloudPush NONE =
                 new CloudPush(new Float4(0f, 0f, 0f, 0f), new Float4(0f, 0f, 0f, 0f),
-                        new Float4(1f, 1f, 1f, 0f), new Float4(0f, 0f, 0f, 0f));
+                        new Float4(1f, 1f, 1f, 0f));
     }
 
     /**
@@ -2282,9 +2283,12 @@ public final class RtComposite {
      * zero there, but returning the shared constant keeps the fast path allocation-free.
      */
     private static WeatherState weatherState(ClientLevel level, float partial) {
-        if (level == null || !CausticaConfig.Rt.Composite.WEATHER_LIGHTING.value()) {
+        if (level == null) {
             return WeatherState.CLEAR;
         }
+        // Keep the actual precipitation levels available to clouds, ground/water ripples and rain sheets
+        // even when the user disables weather LIGHTING. That toggle suppresses the light/sky response;
+        // it should not make the visual weather simulation disappear.
         float rain = Math.clamp(level.getRainLevel(partial), 0f, 1f);
         if (rain <= 0f) {
             return WeatherState.CLEAR;
@@ -2299,6 +2303,9 @@ public final class RtComposite {
         float stormLight = 1.0f - 0.50f * thunder;
         float rainSky = 1.0f - 0.55f * rain;
         float stormSky = 1.0f - 0.45f * thunder;
+        if (!CausticaConfig.Rt.Composite.WEATHER_LIGHTING.value()) {
+            return new WeatherState(rain, thunder, 1.0f, 1.0f);
+        }
         return new WeatherState(rain, thunder, rainSky * stormSky, rainLight * stormLight);
     }
 
@@ -2509,14 +2516,19 @@ public final class RtComposite {
             // Neither the Nether nor the End has a sky to put clouds in; both draw a closed skybox.
             return CloudPush.NONE;
         }
-        // Weather FILL, kept separate from the player's coverage slider all the way to the shader:
-        // rain alone must be able to close the sky completely (the old 0.85/0.15 split topped out
-        // short of full cover in a plain rainstorm — the reported bug 3 — and the classic style's
-        // threshold then read the shortfall as punched holes). Thunder implies rain in vanilla, so it
-        // only ever reinforces the ramp. The two classic/volumetric styles consume this differently
-        // (authored cells fill progressively vs. the noise threshold dropping), which is why it rides
-        // its own lane instead of being pre-merged into the coverage value here.
-        float fill = Math.min(1f, weather.rain() + weather.thunder());
+        // Weather fill stays separate from the player's coverage slider so both cloud styles can
+        // blend it in consistently. Its effective amount is capped by RAIN_CLOUD_DENSITY below: storms
+        // should expand/thicken the deck and fade its opacity, but the default should not force a uniform
+        // full-sky wall. The classic/volumetric styles consume this lane differently, so it remains
+        // separate rather than being pre-merged into the coverage value here.
+        float fill = CausticaConfig.Rt.Composite.RAIN_CLOUD_RESPONSE.value()
+                ? Math.min(1f, weather.rain() + weather.thunder()) : 0.0f;
+        // User-controlled density caps how much the storm can expand or thicken the deck. Using raw
+        // weather here overwhelmed the density slider and made rainy cloud decks cover the whole sky.
+        float rainDensity = CausticaConfig.Rt.Composite.RAIN_CLOUD_RESPONSE.value()
+                ? Math.clamp(CausticaConfig.Rt.Composite.RAIN_CLOUD_DENSITY.value(), 0.0f, 1.0f) : 0.0f;
+        float effectiveFill = fill * rainDensity;
+        float storm = effectiveFill * effectiveFill * (3.0f - 2.0f * effectiveFill);
         float height = CausticaConfig.Rt.Composite.CLOUD_HEIGHT.value();
         // Wind drift, in blocks, from world time. Wrapped with the anchor below.
         double gameTime = 0.0;
@@ -2531,78 +2543,33 @@ public final class RtComposite {
         // offset matches vanilla's own (cameraZ + 3.96 in CloudRenderer.render).
         double anchorX = camX + drift;
         double anchorZ = camZ + CLOUD_Z_OFFSET_BLOCKS;
-        // Formation thickness.
-        //
-        // Volumetric: straight from the two sliders, in blocks. `maxThickness` is the depth of the
-        // BOUNDING slab the shader marches (each formation may additionally float up to
-        // CLOUD_BASE_JITTER_BLOCKS above the base plane), and the pair itself is handed to the shader in
-        // cloudShape.xy, where cloudFormationThickness turns it into per-formation geometry. Note there
-        // is no "flat sheet at 0%" behaviour here any more: a generated cloud's thickness IS its extent,
-        // and 16 blocks is already the thinnest the sliders allow.
-        //
-        // Classic: the legacy thickness slider scales the height of vanilla's authored cell boxes,
-        // floored at vanilla's own 4-block extrusion, so classic clouds are always real boxes with lit
-        // tops and shaded sides.
-        boolean volumetric = CausticaConfig.Rt.Composite.cloudStyleIndex() == CLOUD_STYLE_VOLUMETRIC;
-        int minThickness = CausticaConfig.Rt.Composite.cloudMinThicknessBlocks();
-        int maxThickness = CausticaConfig.Rt.Composite.cloudMaxThicknessBlocks();
-        float thickness;
-        if (volumetric) {
-            thickness = maxThickness + CLOUD_BASE_JITTER_BLOCKS;
-        } else {
-            thickness = Math.max(CLOUD_CLASSIC_MIN_THICKNESS,
-                    Math.clamp(CausticaConfig.Rt.Composite.CLOUD_THICKNESS.value(), 0f, 1f)
-                            * CLOUD_CLASSIC_MAX_THICKNESS_BLOCKS);
+        // Keep the wrapped anchor in unscaled world coordinates. The shader grows the local coverage
+        // and volume density around cloud centres; scaling these absolute coordinates instead would
+        // translate the entire deck by thousands of blocks as rain ramps in.
+        // Player-controlled thickness. At 0 the shader takes its flat-plane path (see
+        // CLOUD_FLAT_EPSILON in clouds.slang), so the slider bottoming out is genuinely a flat deck
+        // rather than a degenerate zero-length march — that stays true for the volumetric style. The
+        // classic style floors at vanilla's own 4-block box height instead: its shapes come from the
+        // authored clouds.png cells, and the slider scales box HEIGHT from the vanilla baseline up.
+        float thickness = Math.clamp(CausticaConfig.Rt.Composite.CLOUD_THICKNESS.value(), 0f, 1f)
+                * CLOUD_MAX_THICKNESS_BLOCKS;
+        thickness = Math.min(CLOUD_MAX_THICKNESS_BLOCKS, thickness + 34.0f * storm);
+        if (CausticaConfig.Rt.Composite.cloudStyleIndex() != CLOUD_STYLE_VOLUMETRIC) {
+            thickness = Math.max(CLOUD_CLASSIC_MIN_THICKNESS, thickness);
         }
-        // The height slider sets the deck's BASE, but the shader's slab is centred on the pushed height,
-        // so the half-thickness is added back here. Pushing the base directly would make the clouds
-        // appear to sink as the thickness changes (the slab would grow downward as well as upward),
-        // which would make the two controls fight each other — the base is the edge the player actually
-        // sees and judges the height by.
+        opacity = Math.clamp(opacity + 0.12f * storm, 0f, 1f);
+        // The slider sets the deck's BASE, but the shader's slab is centred on the pushed height, so the
+        // half-thickness is added back here. Pushing the base directly would make the clouds appear to
+        // sink as the thickness slider is raised (the slab would grow downward as well as upward), which
+        // would make the two sliders fight each other — the base is the edge the player actually sees
+        // and judges the height by.
         float deckCentre = height + thickness * 0.5f;
         return new CloudPush(
                 new Float4(Math.clamp(coverage, 0f, 1f), Math.clamp(opacity, 0f, 1f),
                         Math.clamp(shadow, 0f, 1f), (float) (deckCentre - cameraY)),
                 new Float4(wrapCloudAnchor(anchorX), wrapCloudAnchor(anchorZ),
                         thickness, cloudViewLimit(deckCentre - (float) cameraY)),
-                cloudColorState(fill),
-                new Float4(minThickness, maxThickness, cloudMorphOffsetBlocks(), 0f));
-    }
-
-    /**
-     * Shape-evolution offset for the volumetric field, in blocks.
-     *
-     * <p>This is a separate clock from the wind drift on purpose. The drift translates the whole deck
-     * across the sky; this offset slowly churns the 3D density through the formations, so a cloud's
-     * lobes billow and erode in place instead of the entire cloudscape sliding past as a rigid stamp.
-     * Real clouds do both at once, and having only the first is a large part of why procedural decks
-     * read as "sliding noise".
-     *
-     * <p>Derived from the partial-tick game time (20 ticks/s), so it pauses with the world and needs no
-     * extra state. The result is wrapped to {@link #CLOUD_MORPH_PERIOD_BLOCKS}, which clouds.slang
-     * documents as a whole period of every anisotropic lattice it displaces — so the wrap is invisible
-     * instead of a snap, and the value stays small enough to keep float precision forever.
-     */
-    private static float cloudMorphOffsetBlocks() {
-        var mc = Minecraft.getInstance();
-        if (mc == null) {
-            return 0f;
-        }
-        double gameTime = 0.0;
-        var level = mc.level;
-        if (level != null) {
-            gameTime = level.getGameTime();
-        }
-        gameTime += mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
-        double offset = gameTime / 20.0 * CLOUD_MORPH_BLOCKS_PER_SECOND;
-        offset %= CLOUD_MORPH_PERIOD_BLOCKS;
-        if (offset < 0.0) {
-            offset += CLOUD_MORPH_PERIOD_BLOCKS;
-        }
-        // The shader adds this to a formation-relative height, so it must stay non-negative and below
-        // the period: a full period of every displaced lattice is invisible either way, and keeping it
-        // in range means the offset never grows the float it is added to.
-        return (float) offset;
+                cloudColorState(fill));
     }
 
     /**
@@ -2621,25 +2588,31 @@ public final class RtComposite {
             Minecraft mc = Minecraft.getInstance();
             if (mc != null && mc.gameRenderer != null) {
                 float partial = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
-                Vector4fc cloud = mc.gameRenderer.mainCamera().attributeProbe()
+                int argb = mc.gameRenderer.mainCamera().attributeProbe()
                         .getValue(EnvironmentAttributes.CLOUD_COLOR, partial);
-                r = srgbToLinear(cloud.x());
-                g = srgbToLinear(cloud.y());
-                b = srgbToLinear(cloud.z());
+                r = srgb8ToLinear(ARGB.red(argb));
+                g = srgb8ToLinear(ARGB.green(argb));
+                b = srgb8ToLinear(ARGB.blue(argb));
             }
         } catch (Throwable ignored) {
             // Probe unavailable (early boot / unsupported context): white is the correct default.
         }
+        float storm = Math.clamp(weatherFill, 0f, 1f);
+        storm = storm * storm * (3.0f - 2.0f * storm);
+        float stormDarkening = 1.0f - 0.22f * storm;
+        r *= stormDarkening;
+        g *= stormDarkening;
+        b *= stormDarkening;
         return new Float4(r, g, b, Math.clamp(weatherFill, 0f, 1f));
     }
 
     /**
-     * Standard sRGB-to-linear decode — the same curve the material compiler uses
+     * Standard sRGB-to-linear decode for an 8-bit channel — the same curve the material compiler uses
      * (RtMaterialTextureData keeps it package-private, so the one duplicate lives here rather than
-     * widening that class's visibility for a single caller). The 26.3 environment color attributes
-     * carry sRGB-encoded 0..1 vectors (raw /255 of the same hex colors), so decoding still applies.
+     * widening that class's visibility for a single caller).
      */
-    private static float srgbToLinear(float v) {
+    private static float srgb8ToLinear(int value8) {
+        float v = (value8 & 0xFF) / 255.0f;
         return v <= 0.04045f ? v / 12.92f : (float) Math.pow((v + 0.055f) / 1.055f, 2.4f);
     }
 
@@ -2898,10 +2871,6 @@ public final class RtComposite {
         destroyRestirResources();
         destroyGuideImages();
         exposure.destroy();
-        if (bloomPipeline != null) {
-            bloomPipeline.destroy();
-            bloomPipeline = null;
-        }
         if (displayPipeline != null) {
             displayPipeline.destroy();
             displayPipeline = null;
@@ -3323,7 +3292,7 @@ public final class RtComposite {
             fgHudlessImage = ctx.createStorageImage(main.width, main.height, VK10.VK_FORMAT_R8G8B8A8_UNORM,
                     "FG hudless capture " + main.width + "x" + main.height);
         }
-        var encoder = (VulkanCommandEncoder) ((FrontendCommandEncoder) RenderSystem.getDevice().createCommandEncoder()).backend();
+        var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).caustica$getBackend();
         VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
         try (MemoryStack stack = MemoryStack.stackPush()) {
             // Make writes into `main` visible to the copy (the combined UI has not touched `main` yet this
@@ -3458,11 +3427,7 @@ public final class RtComposite {
         long hudlessView = hudlessReady ? hudlessSrc.view : 0L;
         long hudlessImg = hudlessReady ? hudlessSrc.image : 0L;
         int hudlessFmt = hdrBackbuffer ? VK10.VK_FORMAT_R16G16B16A16_SFLOAT : VK10.VK_FORMAT_R8G8B8A8_UNORM;
-        // `preparedThisFrame` rejects the stale-overlay case: on F1 frames nothing reaches the GUI redirect,
-        // so the texture still holds the HUD from before it was hidden — feeding that to DLSSG would flash
-        // the HUD over a HUD-less real frame at the FG rate.
-        boolean uiReady = RtUiOverlay.preparedThisFrame()
-                && RtUiOverlay.overlayWidth() == swapW && RtUiOverlay.overlayHeight() == swapH
+        boolean uiReady = RtUiOverlay.overlayWidth() == swapW && RtUiOverlay.overlayHeight() == swapH
                 && RtUiOverlay.overlayColorView() != 0L && RtUiOverlay.overlayColorImage() != 0L;
         long uiView = uiReady ? RtUiOverlay.overlayColorView() : 0L;
         long uiImg = uiReady ? RtUiOverlay.overlayColorImage() : 0L;
@@ -3668,14 +3633,7 @@ public final class RtComposite {
                     // UI re-composite (hudless path only): stamp this tick's overlay — hand, GUI,
                     // screen effects, mod overlays — onto every generated frame, identical across the
                     // group, which is what stops screen-fixed content from wobbling.
-                    //
-                    // Requires the overlay to have been prepared THIS frame. With the HUD hidden (F1)
-                    // nothing draws into the overlay for the whole frame — GuiRenderer.draw only fetches
-                    // its destination when it has draws queued, and the hand/crosshair/world overlays
-                    // all bail — so the texture would still hold the pre-F1 HUD. Stamping that onto the
-                    // generated frames while the real frame has none made the HUD blink at the FG rate.
-                    long overlayView = hudlessReady && RtUiOverlay.preparedThisFrame()
-                            ? RtUiOverlay.overlayColorView() : 0L;
+                    long overlayView = hudlessReady ? RtUiOverlay.overlayColorView() : 0L;
                     boolean uiReady = overlayView != 0L
                             && RtUiOverlay.overlayWidth() == swapW && RtUiOverlay.overlayHeight() == swapH;
                     if (uiReady && ensureUiSampler(ctx)) {

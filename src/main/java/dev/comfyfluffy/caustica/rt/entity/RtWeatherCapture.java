@@ -79,6 +79,12 @@ public final class RtWeatherCapture {
     private static final int RAIN_TABLE_SIZE = 32;
     private static final int HALF_RAIN_TABLE_SIZE = 16;
 
+    /**
+     * Vanilla weather radius is at most 10 blocks (21 × 21 = 441 columns). Reserve a slightly larger
+     * cap so all columns remain available even when ordinary particles or nearby entities are plentiful.
+     */
+    public static final int MAX_CAPTURE_COLUMNS = 512;
+
     /** Max alpha for rain vs. snow, matching vanilla's two {@code renderInstances} calls. */
     private static final float RAIN_MAX_ALPHA = 1.0f;
     private static final float SNOW_MAX_ALPHA = 0.8f;
@@ -167,6 +173,13 @@ public final class RtWeatherCapture {
         return CausticaConfig.Rt.Entities.WEATHER_ENABLED.value();
     }
 
+    /** Whether this frame actually has precipitation, used to reserve particle capacity for its columns. */
+    public static boolean willRenderWeather() {
+        if (!enabled()) return false;
+        WeatherRenderState state = weatherState();
+        return state != null && state.intensity > 0.0f && state.radius > 0;
+    }
+
     /**
      * Append this frame's rain and snow columns to {@code capture} (a particle-mode capture: the caller
      * has already set the any-hit alpha bucket and the camera-relative → rebased offset on
@@ -178,7 +191,7 @@ public final class RtWeatherCapture {
      * @param capture the shared entity/particle mesh accumulator
      * @param out     the {@link RtParticleCapture} adapter feeding {@code capture}, offset already set
      * @param camPos  this frame's camera position (columns are emitted relative to it, as vanilla does)
-     * @param budget  max columns to capture, so weather cannot exhaust the particle budget on its own
+     * @param budget  maximum columns to capture, bounded by FrameBuild's reserved weather slots
      */
     public int capture(RtEntityCapture capture, RtParticleCapture out, Vec3 camPos, int budget) {
         if (!enabled() || budget <= 0) {
@@ -301,11 +314,19 @@ public final class RtWeatherCapture {
         int camFloorX = Mth.floor(camPos.x);
         int camFloorZ = Mth.floor(camPos.z);
         int emitted = 0;
-
-        for (WeatherEffectRenderer.ColumnInstance column : columns) {
-            if (emitted >= budget) {
-                break;
-            }
+        // When the shared particle budget is tight, sample across the WHOLE vanilla column grid instead
+        // of stopping at the first N list entries. Stopping early creates a visible rain/no-rain boundary
+        // across the terrain even while the global wetness and ground ripples continue everywhere.
+        int sampleCount = Math.min(columns.size(), budget);
+        // Select exactly sampleCount columns distributed across the entire vanilla weather grid.
+        // A simple ceil(size / budget) stride under-filled the budget badly (e.g. 700 columns / 600
+        // slots selected only every second entry), leaving visible dry-looking gaps across the view.
+        for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++) {
+            if (emitted >= budget) break;
+            int columnIndex = sampleCount == columns.size() ? sampleIndex
+                    : (int) (((long) sampleIndex * columns.size() + columns.size() / 2L) / sampleCount);
+            columnIndex = Math.min(columns.size() - 1, columnIndex);
+            WeatherEffectRenderer.ColumnInstance column = columns.get(columnIndex);
             // Skip the column the camera stands inside — the one whose orientation-table entry is the
             // table centre. Vanilla never draws it: that entry is NaN (-0/0 in its constructor), and the
             // rasteriser discards any quad with a NaN vertex, so the accidental skip is part of the

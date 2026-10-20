@@ -104,29 +104,13 @@ public struct WorldPush {
     public float4   cloudAnchor;      // xy wind-scrolled sample anchor (blocks, wrapped), z slab thickness, w view limit
     // Classic-style authored shape + colour. cloudColor.xyz is vanilla's own EnvironmentAttributes
     // CLOUD_COLOR in linear space — the value the game already resolves per dimension AND per weather,
-    // so the deck greys in a storm with no hand-tuned ramp. cloudColor.w is the weather overcast fill
-    // 0..1: rain pushes it toward 1, and the shader uses it to close the sky beyond the authored/slid
-    // coverage (see cloudCoverage). cloudCellsAddr points at the bit-packed clouds.png occupancy map
+    // so the deck greys in a storm with no hand-tuned ramp. cloudColor.w is the raw weather fill; the
+    // shader scales its extra coverage contribution by rainEffects.w so storm clouds need not cover the
+    // entire sky. cloudCellsAddr points at the bit-packed clouds.png occupancy map
     // riding this same BDA ring slot (0 = unavailable, fall back to the noise deck) — same transport as
     // the DH ready mask, no extra binding.
     public float4   cloudColor;
-    // Volumetric cloud generation parameters (clouds.slang).
-    //   x = minimum formation thickness in blocks, y = maximum formation thickness in blocks.
-    //       These are the Min/Max Cloud Thickness sliders, in the deck's own units (blocks), and they
-    //       drive the actual geometry: each formation's vertical extent is sampled between them, so a
-    //       range produces a deck of clouds of different heights and equal values produce uniform ones.
-    //   z = shape-evolution offset in blocks, already wrapped to the field's churn period. The 3D
-    //       density latices drift through this coordinate slowly, so a cloud billows and morphs in
-    //       place on top of the deck's wind drift.
-    //   w = reserved (0).
-    public float4   cloudShape;
     public uint64_t cloudCellsAddr;
-    // Blue-noise dither tile (RtBlueNoise, host side): 64x64 RGBA8 words, R/G = the BSDF direction
-    // pair and B/A = the NEE light-position pair. math.slang samples it at pixel coordinates with a
-    // per-frame/per-sample toroidal shift, so the first stochastic choice at every shading vertex is
-    // spatially well distributed instead of white-noise hash grain. 0 = no tile published (host not
-    // ready), and every call site falls back to the PCG stream unchanged.
-    public uint64_t blueNoiseAddr;
     // Shader-only Parallax Occlusion Mapping (LabPBR _n alpha height field). Geometry and BLASes are
     // never rebuilt; a zero relief depth disables the effect entirely.
     public float4   parallaxParams;   // x relief depth, y max texel crossings, z unused, w max distance
@@ -184,9 +168,24 @@ public struct WorldPush {
     // attribute (the value vanilla's fog fades toward — biome blend, rain, dimension, all
     // composed upstream), w = the player's blend strength 0..1. fog.slang's fogTintNow lerps
     // it against the module's neutral tint, so a zero w costs no branch and the celestial and
-    // emitter scatter terms can never tint differently. Trailing lane after fogParams — the
-    // generated WorldPushData appends it; RtFogShaderRegressionTest pins the pairing.
+    // emitter scatter terms can never tint differently. This lane follows fogParams; the
+    // RtFogShaderRegressionTest pins the Java/Slang pairing.
     public float4   fogTint;
+    // Rain-driven material response. x = global surface wetness 0..1; the CPU advances it over
+    // the configured wet duration and lets it dry over the configured dry duration after rain ends.
+    // y = wet-film gloss 0..1; z = ground rain-ripple amplitude (0 disables);
+    // w = live wetness-transition radius in blocks (0 keeps the strict rain-exposure cutoff).
+    public float4   surfaceWetness;
+    // Live controls for rain/water effects, kept trailing to preserve all previous field offsets.
+    // rainEffects: x water-ripple scale, y water-ripple strength (0 disables), z rain refraction strength,
+    //              w rain-driven cloud fill multiplier (0 disables weather-driven cloud coverage).
+    public float4   rainEffects;
+    // underwaterEffects: x underwater haze strength, y blue colour bias 0..1, z reserved,
+    //                    w fallback segment length for underwater sky misses. Haze density is spatially uniform.
+    public float4   underwaterEffects;
+    // Lightning state, trailing to preserve the established WorldPush offsets: xyz strike position
+    // in terrain-rebased world blocks, w momentary flash intensity (0 when inactive).
+    public float4   lightning;
 };
 
 // worldPush.dimension: the sky/lighting model this frame renders with. The Overworld runs the full
@@ -283,6 +282,12 @@ public static const uint TERRAIN_PRIM_IN_LIGHT_BUFFER = 1u;
 // the dedicated portal branches (Nether swirl / End night sky) instead of the block texture.
 public static const uint TERRAIN_PRIM_PORTAL_NETHER = 2u;
 public static const uint TERRAIN_PRIM_PORTAL_END = 4u;
+// Surface bit: terrain and water primitives whose surface column reaches the motion-blocking rain heightmap.
+public static const uint TERRAIN_PRIM_RAIN_EXPOSED = 8u;
+// Alpha-tested surfaces such as leaves may participate in the wetness transition; translucent
+// glass/ice uses its own bit and stays excluded from the wet-film roughness/normal override.
+public static const uint TERRAIN_PRIM_CUTOUT = 16u;
+public static const uint TERRAIN_PRIM_TRANSLUCENT = 32u;
 // Prim.flags (entity prims): a vanilla rain/snow sheet captured by RtWeatherCapture. Shares the flags
 // lane the portal tags use on terrain — particles never carry portal tags, so the bit is unambiguous.
 // Raygen shades these sheets UNLIT (see PAYLOAD_WEATHER): the path tracer's direct/indirect light was
@@ -329,7 +334,7 @@ public struct Payload {
     public float  hitT;        // >= 0 on hit, < 0 on miss.
     public half3  motionPrev;  // per-vertex world displacement since last frame.
     public half3  f0;          // specular F0.
-    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit.
+    public uint  flags;       // hit material flags; miss bits 2/11 = celestial/current ray in water; hit bit 12 = rain-exposed water.
     public uint   roughMetal;  // packHalf2x16(roughness, metalness)
     public uint   emissionSss; // packHalf2x16(emission, sss)
     public uint   iorTransmission; // packHalf2x16(IOR, transmission factor)
@@ -337,6 +342,11 @@ public struct Payload {
 };
 
 public static const uint PAYLOAD_SHOW_CELESTIAL = 4u;
+// Set by raygen from the medium stack for this trace. The miss shader omits the above-water cloud deck
+// while the ray is still in water; otherwise cloud slab coverage leaks through horizon misses as a hard tile.
+public static const uint PAYLOAD_RAY_IN_WATER = 2048u;
+// Set on water hits whose surface is open to precipitation; cave/roof water gets no rain-impact rings.
+public static const uint PAYLOAD_WATER_RAIN_EXPOSED = 4096u;
 // Rain/snow sheet (Prim.flags carried through by world.rchit): raygen shades it unlit and ends the
 // path there — no NEE, no shadow ray, no RIS, no diffuse continuation — because the path tracer's
 // light response was visibly breaking the weather streaks. See PRIM_WEATHER.
